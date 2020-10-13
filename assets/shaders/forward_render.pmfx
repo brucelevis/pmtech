@@ -2,6 +2,7 @@
 #include "libs/skinning.pmfx"
 #include "libs/globals.pmfx"
 #include "libs/sdf.pmfx"
+#include "libs/area_lights.pmfx"
 
 // vs inputs
 struct vs_input
@@ -11,6 +12,13 @@ struct vs_input
     float4 texcoord : TEXCOORD1;
     float4 tangent : TEXCOORD2;
     float4 bitangent : TEXCOORD3;
+};
+
+struct vs_input_stencil_shadow
+{
+    float4 position : POSITION;
+    float4 face_normal_0 : TEXCOORD0;
+    float4 face_normal_1 : TEXCOORD1;
 };
 
 struct vs_input_skinned
@@ -52,6 +60,21 @@ struct vs_input_multi
     }
 };
 
+struct vs_input_position_only
+{
+	float4 position : POSITION;
+	
+	if:(SKINNED)
+    {
+		float4 normal : TEXCOORD0;
+		float4 texcoord : TEXCOORD1;
+		float4 tangent : TEXCOORD2;
+		float4 bitangent : TEXCOORD3;
+		float4 blend_indices : TEXCOORD4;
+		float4 blend_weights : TEXCOORD5;
+    }
+};
+
 // vs outputs / ps inputs
 struct vs_output
 {
@@ -78,6 +101,12 @@ struct vs_output_zonly
     float4 position : SV_POSITION;
 };
 
+struct vs_output_zonly_wp
+{
+    float4 position : SV_POSITION;
+    float4 world_pos : TEXCOORD0;
+};
+
 struct vs_output_picking
 {
     float4 position : SV_POSITION;
@@ -97,16 +126,31 @@ struct ps_output_multi
     float4 world_pos : SV_Target2;
 };
 
-declare_texture_samplers
+struct ps_output_depth
+{
+    float depth : SV_Depth;
+};
+
+shader_resources
 {
     texture_2d( diffuse_texture, 0 );
     texture_2d( normal_texture, 1 );
     texture_2d( specular_texture, 2 );    
     texture_3d( sdf_volume, 14 );
-    texture_2d( shadowmap_texture, 15 );
+    texture_2d( ltc_mat, 13 );
+    texture_2d( ltc_mag, 12 );
+    if:(PMFX_TEXTURE_CUBE_ARRAY) {
+        texture_cube_array( omni_shadow_texture, 10 );
+    }
+    texture_2d_array( area_light_textures, 11 );
+	texture_3d( volume_gi, 9 );
+	
+	depth_2d( single_shadowmap_texture, 7 );
+	depth_2d_array( shadowmap_texture, 15 );
+	texture_2d( shadowmap_texture_sss, 8);
 };
 
-vs_output_zonly vs_main_zonly( vs_input input, vs_instance_input instance_input )
+vs_output_zonly vs_main_zonly( vs_input_position_only input, vs_instance_input instance_input )
 {
     vs_output_zonly output;
     
@@ -122,20 +166,87 @@ vs_output_zonly vs_main_zonly( vs_input input, vs_instance_input instance_input 
             instance_input.world_matrix_2, 
             instance_input.world_matrix_3
         );
-        
+
         wvp = mul( instance_world_mat, vp_matrix );
     }
     else:
     {
         wvp = mul( world_matrix, vp_matrix );
     }
-
-    output.position = mul( input.position, wvp );
-      
-    // for d3d 0 - 1 clip space
-    output.position /= output.position.w;
-    remap_z_clip_space(output.position.z);
     
+    if:(SKINNED)
+    {
+        float4 sp = skin_pos(input.position, input.blend_weights, input.blend_indices);
+        output.position = mul( sp, vp_matrix );
+    }
+    else:
+    {
+        output.position = mul( input.position, wvp );
+    }
+          
+    return output;
+}
+
+vs_output_zonly_wp vs_main_zonly_wp( vs_input_position_only input, vs_instance_input instance_input )
+{
+    vs_output_zonly_wp output;
+    
+    float4x4 wvp = mul( world_matrix, vp_matrix );
+    float4x4 wm = world_matrix;
+    
+    if:(INSTANCED)
+    {
+        float4x4 instance_world_mat;
+        unpack_vb_instance_mat(
+            instance_world_mat, 
+            instance_input.world_matrix_0, 
+            instance_input.world_matrix_1, 
+            instance_input.world_matrix_2, 
+            instance_input.world_matrix_3
+        );
+        
+        wvp = mul( instance_world_mat, vp_matrix );
+        wm = instance_world_mat;
+    }
+        
+    if:(SKINNED)
+    {
+        float4 sp = skin_pos(input.position, input.blend_weights, input.blend_indices);
+        output.position = mul( sp, vp_matrix );
+        output.world_pos = sp;
+    }
+    else:
+    {
+        output.position = mul( input.position, wvp );
+        output.world_pos = mul( input.position, wm );
+    }
+        
+    return output;
+}
+
+vs_output vs_main_extrude( vs_input_stencil_shadow input )
+{
+    vs_output output; 
+    float4 wp = mul( input.position, world_matrix );
+    
+    float3x3 wrm = to_3x3(world_matrix);
+    wrm[0] = normalize(wrm[0]);
+    wrm[1] = normalize(wrm[1]);
+    wrm[2] = normalize(wrm[2]);
+    
+    float3 wn_0 = mul( input.face_normal_0.xyz, wrm );
+    float3 wn_1 = mul( input.face_normal_1.xyz, wrm );
+    
+    // detect silhouette edges
+    float3 ld = wp.xyz - single_light.pos_radius.xyz;
+    float d0 = dot(ld, wn_0.xyz);
+    float d1 = dot(ld, wn_1.xyz);
+        
+    if(d0 > 0.0 && d1 < 0.0)
+        wp.xyz += ld * 100.0;
+    
+    output.position = mul( wp, vp_matrix);
+        
     return output;
 }
 
@@ -148,9 +259,19 @@ vs_output_pre_skin vs_main_pre_skin( vs_input_skinned input )
     output.vb_position = sp;
     output.normal = input.normal;
     output.tangent = input.tangent;
-    output.bitangent = input.tangent;
+    output.bitangent = input.bitangent;
     output.texcoord = input.texcoord;
-        
+    
+    float3 t = input.tangent.xyz;
+    float3 b = input.bitangent.xyz;
+    float3 n = input.normal.xyz;
+    
+    skin_tbn(t, b, n, input.blend_weights, input.blend_indices);
+    
+	output.normal.xyz = n;
+    output.tangent.xyz = t;
+    output.bitangent.xyz = b;
+    
     return output;
 }
 
@@ -194,7 +315,7 @@ vs_output vs_main( vs_input_multi input, vs_instance_input instance_input )
         output.normal = input.normal.xyz;
     
         skin_tbn(output.tangent, output.bitangent, output.normal, input.blend_weights, input.blend_indices);
-    
+        
         output.position = mul( sp, vp_matrix );
         output.world_pos = sp;
     }
@@ -208,7 +329,7 @@ vs_output vs_main( vs_input_multi input, vs_instance_input instance_input )
         wrm[1] = normalize(wrm[1]);
         wrm[2] = normalize(wrm[2]);
                     
-        output.normal = mul( input.normal.xyz, wrm );
+        output.normal = mul( input.normal.xyz, wrm ); 
         output.tangent = mul( input.tangent.xyz, wrm );
         output.bitangent = mul( input.bitangent.xyz, wrm );
     }
@@ -224,7 +345,7 @@ vs_output vs_main( vs_input_multi input, vs_instance_input instance_input )
     
         output.texcoord *= float4(m_uv_scale.x * xs, m_uv_scale.y * ys, m_uv_scale.x, m_uv_scale.y);
     }
-                
+         
     return output;
 }
 
@@ -238,19 +359,79 @@ float3 transform_ts_normal( float3 t, float3 b, float3 n, float3 ts_normal )
     return normalize( mul_tbn( tbn, ts_normal ) );
 }
 
+ps_output ps_single_light( vs_output input )
+{
+    // this is for multi-pass lighting using stencil shadows.
+    float4 albedo = sample_texture( diffuse_texture, input.texcoord.xy );
+    float3 normal_sample = sample_texture( normal_texture, input.texcoord.xy ).rgb;
+    float4 ro_sample = sample_texture( specular_texture, input.texcoord.xy );
+    float4 specular_sample = float4(1.0, 1.0, 1.0, 1.0);        
+    float  reflectivity = m_reflectivity;
+    float  roughness = ro_sample.x;
+    
+    normal_sample = normal_sample * 2.0 - 1.0;
+
+    float3 n = transform_ts_normal( 
+        input.tangent, 
+        input.bitangent, 
+        input.normal, 
+        normal_sample );
+            
+    float3 lit_colour = float3( 0.0, 0.0, 0.0 );
+    
+    lit_colour += cook_torrence( 
+            single_light.pos_radius, 
+            single_light.colour.rgb,
+            n,
+            input.world_pos.xyz,
+            camera_view_pos.xyz,
+            albedo.rgb,
+            specular_sample.rgb,
+            roughness,
+            reflectivity);    
+        
+    lit_colour += oren_nayar( 
+            single_light.pos_radius, 
+            single_light.colour.rgb,
+            n,
+            input.world_pos.xyz,
+            camera_view_pos.xyz,
+            roughness,
+            albedo.rgb);
+    
+    ps_output output;
+    output.colour.rgb = lit_colour;
+    output.colour.a = albedo.a;
+    
+    return output;
+}
+
+float hash_12(vec2 p)
+{
+    // Two typical hashes...
+	return fract(sin(dot(p, float2(12.9898, 78.233))) * 43758.5453);
+}
+
+float3 hash_33( float3 p )
+{
+	p = float3(dot(p,float3(127.1,311.7, 74.7)),
+			  dot(p,float3(269.5,183.3,246.1)),
+			  dot(p,float3(113.5,271.9,124.6)));
+
+	return fract(sin(p)*43758.5453123) * 2.0 - 1.0;
+}
+
 ps_output ps_forward_lit( vs_output input ) 
 {    
     ps_output output;
-            
+    
     float4 albedo = sample_texture( diffuse_texture, input.texcoord.xy );
-        
     float3 normal_sample = sample_texture( normal_texture, input.texcoord.xy ).rgb;
-    normal_sample = normal_sample * 2.0 - 1.0;
-    
     float4 ro_sample = sample_texture( specular_texture, input.texcoord.xy );
-    
     float4 specular_sample = float4(1.0, 1.0, 1.0, 1.0);
     
+    normal_sample = normal_sample * 2.0 - 1.0;
+
     float3 n = transform_ts_normal( 
         input.tangent, 
         input.bitangent, 
@@ -258,6 +439,8 @@ ps_output ps_forward_lit( vs_output input )
         normal_sample );
         
     albedo *= input.colour;
+    float4 metalness = float4(1.0, 1.0, 1.0, 1.0);
+    //metalness = lerp(metalness, albedo, 0.7);
     
     float3 lit_colour = float3( 0.0, 0.0, 0.0 );
         
@@ -266,13 +449,14 @@ ps_output ps_forward_lit( vs_output input )
     float roughness = saturate(user_data.y); 
 
     reflectivity = m_reflectivity;
-    roughness = ro_sample.x;
+    roughness = ro_sample.r;
     
     if:(INSTANCED)
     {
         roughness = input.colour.a;
+        albedo.a = 1.0;
     }
-    
+        
     if:(SDF_SHADOW)
     {            
         n = input.normal.rgb;
@@ -296,8 +480,11 @@ ps_output ps_forward_lit( vs_output input )
     float t = 1.0;
     
     //for directional lights
+    float3 lll = float3(0.0, 0.0, 0.0);
+    int shadow_map_index = 0;
+    _pmfx_loop
     for( int i = 0; i < int(light_info.x); ++i )
-    {
+    {        
         float3 light_col = float3( 0.0, 0.0, 0.0 );
         
         light_col += cook_torrence( 
@@ -307,10 +494,10 @@ ps_output ps_forward_lit( vs_output input )
             input.world_pos.xyz,
             camera_view_pos.xyz,
             albedo.rgb,
-            specular_sample.rgb,
+            metalness.rgb,
             roughness,
             reflectivity
-        );    
+        );
         
         light_col += oren_nayar( 
             lights[i].pos_radius, 
@@ -318,79 +505,47 @@ ps_output ps_forward_lit( vs_output input )
             n,
             input.world_pos.xyz,
             camera_view_pos.xyz,
-            roughness,
+            1.0 - roughness,
             albedo.rgb
-        );        
+        );
         
         if:(SDF_SHADOW)
         {
             float s = sdf_shadow_trace(max_samples, lights[i].pos_radius.xyz, input.world_pos.xyz, scale, tr1, sdf_shadow.world_matrix_inv, inv_rot);
             light_col *= smoothstep( 0.0, 0.1, s);
         }
-        
+                
         if( lights[i].colour.a == 0.0 )
         {
             lit_colour += light_col;
             continue;
         }
         else
-        {
+        {            
+            float shadow = 1.0;
+            float d = 1.0;
+            
             // shadow map
             float4 offset_pos = float4(input.world_pos.xyz + n.xyz * 0.01, 1.0);
-            float4 sp = mul( offset_pos, shadow_matrix );
+            float4 sp = mul( offset_pos, shadow_matrix[i] );
             sp.xyz /= sp.w;
             sp.y *= -1.0;
-            sp.xyz = sp.xyz * 0.5 + 0.5;
+            sp.xy = sp.xy * 0.5 + 0.5;
+			sp.z = remap_depth(sp.z);
             
-            float d = sample_texture( shadowmap_texture, sp.xy ).r;
+            shadow = sample_shadow_array_pcf_9(float(shadow_map_index), sp.xyz);
             
-            //float d = sample_texture_array(shadowmap_texture, sp.xy, 0).r;
-            //float4 test = sample_texture_array(shadowmap_texture, sp.xy, 0);
-            //float d = 1.0;
-
-            float shadow = sp.z < d ? 1.0 : 0.0;
-
-            lit_colour = light_col * shadow;
+            lit_colour += light_col * shadow;
             
-            if:(SSS)
-            {
-                // sss
-                float4 shrink_pos = float4(input.world_pos.xyz - n.xyz * 0.09, 1.0);
-                sp = mul( shrink_pos, shadow_matrix );
-                sp.xyz /= sp.w;
-                sp.y *= -1.0;
-                sp.xyz = sp.xyz * 0.5 + 0.5;
-                
-                d = sample_texture( shadowmap_texture, sp.xy ).r;
-            
-                float fp = 1.0;
-                float3 light_dir = input.world_pos.xyz - lights[i].pos_radius.xyz;
-            
-                float d1 = d;
-                float d2 = sp.z;
-                d1 *= fp;
-                float sssd = m_sss_scale * abs(d1 - d2) * 0.5 + 0.5;
-            
-                float dd = -sssd * sssd;
-                float3 profile = float3(0.233, 0.455, 0.649) * exp(dd / 0.0064) +
-                     float3(0.1,   0.336, 0.344) * exp(dd / 0.0484) +
-                     float3(0.118, 0.198, 0.0)   * exp(dd / 0.187)  +
-                     float3(0.113, 0.007, 0.007) * exp(dd / 0.567)  +
-                     float3(0.358, 0.004, 0.0)   * exp(dd / 1.99)   +
-                     float3(0.078, 0.0,   0.0)   * exp(dd / 7.41);
-                            
-                float sss = saturate(0.5 + dot(light_dir, n));
-            
-                lit_colour.rgb += profile * sss;
-            
-                lit_colour += albedo.rgb * 0.15;
-            }
+            ++shadow_map_index;
         }
     }
     
     //for point lights
     int point_start = int(light_info.x);
     int point_end =  int(light_info.x) + int(light_info.y);
+    int omni_shadow_index = 0;
+    _pmfx_loop
     for( int i = point_start; i < point_end; ++i )
     {
         float3 light_col = float3( 0.0, 0.0, 0.0 );
@@ -402,7 +557,7 @@ ps_output ps_forward_lit( vs_output input )
             input.world_pos.xyz,
             camera_view_pos.xyz,
             albedo.rgb,
-            specular_sample.rgb,
+            metalness.rgb,
             roughness,
             reflectivity
         );    
@@ -426,12 +581,37 @@ ps_output ps_forward_lit( vs_output input )
             light_col *= smoothstep( 0.0, 0.1, s);
         }
         
-        lit_colour += light_col;
+        if( lights[i].colour.a == 0.0)
+        {
+            lit_colour += light_col;
+            continue;
+        }
+        else
+        {
+            if:(PMFX_TEXTURE_CUBE_ARRAY)
+            {
+                // omni directional shadow
+                float3 to_light = (input.world_pos.xyz - lights[i].pos_radius.xyz);
+                float d = length(to_light) / 2.0; // omni shadow space far plane is radius * 2.0
+                float3 cv = normalize(to_light) * float3(1.0, 1.0, -1.0);
+                
+                float cube_d = sample_texture_cube_array_level(omni_shadow_texture, cv, float(omni_shadow_index), 0.0).r;
+                lit_colour += d < cube_d * lights[i].pos_radius.w ? light_col : float3(0.0, 0.0, 0.0);
+
+                ++omni_shadow_index;
+            }
+            else:
+            {
+            	lit_colour += light_col;
+            	continue;
+            }
+        }   
     }
     
     //for spot lights
     int spot_start = point_end;
-    int spot_end =  int(light_info.y) + int(light_info.z);
+    int spot_end =  spot_start + int(light_info.z);
+    _pmfx_loop
     for(int i = spot_start; i < spot_end; ++i )
     {
         float3 light_col = float3( 0.0, 0.0, 0.0 );
@@ -443,7 +623,7 @@ ps_output ps_forward_lit( vs_output input )
             input.world_pos.xyz,
             camera_view_pos.xyz,
             albedo.rgb,
-            specular_sample.rgb,
+            metalness.rgb,
             roughness,
             reflectivity
         );    
@@ -470,13 +650,181 @@ ps_output ps_forward_lit( vs_output input )
             light_col *= smoothstep( 0.0, 0.1, s);
         }
         
-        
-        lit_colour += light_col;
-    }
-
-    output.colour.rgb = lit_colour.rgb;    
-    output.colour.a = albedo.a;
+        if( lights[i].colour.a == 0.0 )
+        {
+            lit_colour += light_col;
+            continue;
+        }
+        else
+        {            
+            float shadow = 1.0;
+            float d = 1.0;
             
+            // shadow map
+            float4 offset_pos = float4(input.world_pos.xyz + n.xyz * 0.01, 1.0);
+            float4 sp = mul( offset_pos, shadow_matrix[shadow_map_index] );
+            sp.xyz /= sp.w;
+            sp.y *= -1.0;
+            sp.xy = sp.xy * 0.5 + 0.5;
+			sp.z = remap_depth(sp.z);
+
+            shadow = sample_shadow_array_pcf_9(float(shadow_map_index), sp.xyz);
+
+            lit_colour += light_col * shadow;
+            
+            ++shadow_map_index;
+        }
+    }
+        
+    // area lights
+    {
+    	// area lights constant colour
+		float pi = 3.14159265359;
+		int num_area_lights = int(area_light_info.x);
+		for(int i = 0; i < num_area_lights; ++i)
+		{
+			float3 v = -normalize(input.world_pos.xyz - camera_view_pos.xyz);
+			float3 pos = input.world_pos.xyz;
+		
+			float3 points[4];
+			for(int j = 0; j < 4; ++j)
+				points[j] = area_lights[i].corners[j].xyz;
+		
+			// diffuse
+			float diff_sum = area_light_diffuse(points, pos, n, v);
+			float3 diff = area_lights[i].colour.rgb * diff_sum;
+		
+			// specular 
+			float spec_sum = area_light_specular(points, pos, ro_sample.x, n, v);
+			float3 spec = area_lights[i].colour.rgb * spec_sum;
+		
+			float3 light_col = (spec.rgb + diff.rgb) / (2.0 * pi);        
+			lit_colour += light_col;
+		}
+    
+    	// area lights textured
+        int ts = num_area_lights;
+        int num_area_lights_textured = int(area_light_info.y);
+        for(int i = ts; i < ts + num_area_lights_textured; ++i)
+        {
+            float slice = area_lights[i].colour.w;
+            float levels = 8.0;
+            float2 inv_texel = float2(1.0/640.0, 1.0/480.0);
+            float2 inv_texel_x = float2(1.0, 1.0) - inv_texel;
+        
+            float3 points[4];
+            for(int j = 0; j < 4; ++j)
+                points[j] = area_lights[i].corners[j].xyz;
+
+            float3 v = -normalize(input.world_pos.xyz - camera_view_pos.xyz);
+            float3 pos = input.world_pos.xyz;
+        
+            // diffuse
+            float4 diff_uv = area_light_diffuse_uv(points, pos, n, v);
+            float2 duv = clamp(diff_uv.xy, inv_texel, inv_texel_x);
+            float3 diff = sample_texture_array_level( area_light_textures, duv, slice, diff_uv.z * levels).rgb * diff_uv.w;
+        
+            // specular 
+            float4 spec_uv = area_light_specular_uv(points, pos, ro_sample.x, n, v);
+            float2 suv = clamp(spec_uv.xy, inv_texel, inv_texel_x);
+            float3 spec = sample_texture_array_level(area_light_textures, suv, slice, spec_uv.z * levels).rgb * spec_uv.w; 
+        
+            float3 light_col = (spec.rgb + diff.rgb) / (2.0 * pi);        
+            lit_colour += light_col;
+        }
+    }
+	
+	output.colour.rgb = lit_colour.rgb * albedo.a;    
+    output.colour.a = albedo.a;
+	
+	// gi volume tracing..
+	if:(GI)
+	{    			
+		// geometry tb for casting rays
+		float3 gn = input.normal.xyz;
+		float3 gt = input.tangent.xyz;
+		float3 gb = input.bitangent.xyz;
+		
+		// scene / volume dimensions
+		float3 dim = gi_scene_size.xyz;	
+		float3 to_uvx = dim * 0.5;
+		
+		// 16 rays on sphere surface
+		int num_rays = 16;
+		float3 rays[16];
+		rays[0] = float3(0.57735, 0.57735, 0.57735);
+		rays[1] = float3(0.57735, -0.57735, -0.57735);
+		rays[2] = float3(-0.57735, 0.57735, -0.57735);
+		rays[3] = float3(-0.57735, -0.57735, 0.57735);
+		rays[4] = float3(-0.903007, -0.182696, -0.388844);
+		rays[5] = float3(-0.903007, 0.182696, 0.388844);
+		rays[6] = float3(0.903007, -0.182696, 0.388844);
+		rays[7] = float3(0.903007, 0.182696, -0.388844);
+		rays[8] = float3(-0.388844, -0.903007, -0.182696);
+		rays[9] = float3(0.388844, -0.903007, 0.182696);
+		rays[10] = float3(0.388844, 0.903007, -0.182696);
+		rays[11] = float3(-0.388844, 0.903007, 0.182696);
+		rays[12] = float3(-0.182696, -0.388844, -0.903007);
+		rays[13] = float3(0.182696, 0.388844, -0.903007);
+		rays[14] = float3(-0.182696, 0.388844, 0.903007);
+		rays[15] = float3(0.182696, -0.388844, 0.903007);
+				
+		float4 gi = float4(0.0, 0.0, 0.0, 0.0);
+
+		// trace rays
+		for(int i = 0; i < num_rays; ++i)
+		{
+			// start outside occlusion
+			float3 tex_size = gi_volume_size.xyz;
+			float3 noise = (hash_33(input.world_pos.xyz) * 0.5);
+			float3 ray = chebyshev_normalize(rays[i] + noise);
+			float3 cn = chebyshev_normalize(n);
+			float3 step = (dim*2.0) / tex_size;
+			float3 sp = input.world_pos.xyz + (cn * step);
+			
+			// ensure ray is pointing in normals hemisphere
+			ray *= dot(ray, gn) < 0.0 ? -1.0 : 1.0;
+			
+			// gather gi
+			float4 ray_gi = float4(0.0, 0.0, 0.0, 0.0);
+			
+			// sample each mip map level
+			// first 4 levels make the main contribution, after 4 its hard to notice any difference
+			for(int j = 0; j < 4; ++j)
+			{					
+				// 2 steps per level to cover the distance of 1 texel in mip j+1
+				for(int k = 0; k < 2; ++k)
+				{
+					step = (dim*2.0) / tex_size;
+				
+					float3 uvw = saturate((sp / to_uvx) * 0.5 + 0.5);					
+					float4 g = sample_texture_level( volume_gi, uvw, float(j));
+										
+					float d = length(input.world_pos.xyz - sp);
+					d = smoothstep(0.0, 8.0, d);
+					
+					ray_gi.rgb = ray_gi.rgb + g.rgb * d;
+					ray_gi.a += g.a;
+							
+					sp += ray * step.x;							
+				}
+				tex_size /= 2.0;
+				
+				// break if we reach 1 alpha but accumulate mip 0 for better coverage at contact points
+				if(ray_gi.a >= 1.0 && j > 1)
+					break;
+			}
+			gi += ray_gi;
+		}
+		gi /= float(num_rays);
+		
+		// could multiply gi with albedo but additive gi gives a stronger effect
+		output.colour.rgb = gi.rgb * 2.0 * m_albedo.rgb + lit_colour.rgb;
+	}
+	    
+    if(albedo.a <= 0.0)
+    	discard;
+    	
     return output;
 }
 
@@ -516,116 +864,446 @@ void ps_null( vs_output_zonly input )
     return;
 }
 
+ps_output ps_dbg( vs_output input )
+{
+    ps_output output;
+    output.colour = float4(1.0, 0.0, 1.0, 1.0);
+    return output;
+}
+
+ps_output_depth ps_omni_shadow( vs_output_zonly_wp input )
+{
+    ps_output_depth output;
+    float d = length(input.world_pos.xyz - single_light.pos_radius.xyz) / single_light.pos_radius.w;
+    output.depth = d / 2.0; // divide by 2 because the ortho far plane is light radius * 2.0
+    return output;
+}
+
+ps_output ps_albedo( vs_output_zonly input )
+{
+    ps_output output;
+    output.colour = m_albedo;
+    output.colour.a = 1.0;
+    return output;
+}
+
+ps_output ps_single_light_diffuse( vs_output input )
+{
+    ps_output output;
+    
+    float3 l = normalize(single_light.pos_radius.xyz - input.world_pos.xyz);
+    float3 lc = single_light.colour.rgb;
+    
+    output.colour.rgb = (m_albedo.rgb * dot(input.normal, l) * lc);
+    output.colour.rgb += m_albedo.rgb * 0.3;
+    output.colour.a = 1.0;
+    
+    return output;
+}
+
+ps_output ps_per_pixel_velocity( vs_output input )
+{
+	ps_output output;
+    
+    output.colour = float4(1.0, 0.0, 0.0, 0.0);
+    
+    return output;
+}
+
+ps_output ps_single_light_diffuse( vs_output input )
+{
+    ps_output output;
+    
+    float3 l = normalize(single_light.pos_radius.xyz - input.world_pos.xyz);
+    float3 lc = single_light.colour.rgb;
+    
+    output.colour.rgb = (m_albedo.rgb * dot(input.normal, l) * lc);
+    output.colour.rgb += m_albedo.rgb * 0.3;
+    output.colour.a = 1.0;
+    
+    return output;
+}
+
+ps_output ps_simple_lighting( vs_output input )
+{
+    ps_output output;
+    
+    float4 albedo = sample_texture( diffuse_texture, input.texcoord.xy );
+    float3 normal_sample = sample_texture( normal_texture, input.texcoord.xy ).rgb;
+    float4 ro_sample = sample_texture( specular_texture, input.texcoord.xy );
+    float4 specular_sample = float4(1.0, 1.0, 1.0, 1.0);
+    
+    normal_sample = normal_sample * 2.0 - 1.0;
+
+    float3 n = transform_ts_normal( 
+        input.tangent, 
+        input.bitangent, 
+        input.normal, 
+        normal_sample );
+        
+    albedo *= input.colour;
+    float4 metalness = float4(1.0, 1.0, 1.0, 1.0);
+    
+    float3 lit_colour = float3( 0.0, 0.0, 0.0 );
+        
+    float reflectivity = saturate(user_data.z);
+    float roughness = saturate(user_data.y); 
+
+    reflectivity = m_reflectivity;
+    roughness = m_roughness;
+    
+    if:(INSTANCED)
+    {
+        roughness = input.colour.a;
+        albedo.a = 1.0;
+    }
+    
+	//for directional lights
+    float3 lll = float3(0.0, 0.0, 0.0);
+    int shadow_map_index = 0;
+    _pmfx_loop
+    for(int i = 0; i < 1; ++i )
+    {        
+        float3 light_col = float3( 0.0, 0.0, 0.0 );
+        
+        light_col += cook_torrence( 
+            lights[i].pos_radius, 
+            lights[i].colour.rgb,
+            n,
+            input.world_pos.xyz,
+            camera_view_pos.xyz,
+            albedo.rgb,
+            metalness.rgb,
+            roughness,
+            reflectivity
+        );
+        
+        light_col += oren_nayar( 
+            lights[i].pos_radius, 
+            lights[i].colour.rgb,
+            n,
+            input.world_pos.xyz,
+            camera_view_pos.xyz,
+            1.0 - roughness,
+            albedo.rgb
+        );
+                                
+        if( lights[i].colour.a == 0.0 )
+        {
+            lit_colour += light_col;
+            continue;
+        }
+        else
+        {            
+            float shadow = 1.0;
+            float d = 1.0;
+            
+            // shadow map
+            float4 offset_pos = float4(input.world_pos.xyz + n.xyz * 0.01, 1.0);
+            float4 sp = mul( offset_pos, shadow_matrix[i] );
+            sp.xyz /= sp.w;
+            sp.y *= -1.0;
+            sp.xy = sp.xy * 0.5 + 0.5;
+			sp.z = remap_depth(sp.z);
+            
+            shadow = sample_shadow_pcf_9(sp.xyz);
+            
+            lit_colour += light_col * shadow;
+            
+            if:(SSS)
+            {
+                // sss
+                float sss_offset = 0.1;
+                float4 shrink_pos = float4(input.world_pos.xyz - input.normal.xyz * sss_offset, 1.0);
+                
+                sp = mul( shrink_pos, shadow_matrix[i] );
+                sp.xyz /= sp.w;
+                sp.y *= -1.0;
+                sp.xy = sp.xy * 0.5 + 0.5;
+				sp.z = remap_depth(sp.z);
+                
+                float4 sm = sample_texture_level( shadowmap_texture_sss, sp.xy, 0.0 );
+                d = sm.r;
+                
+                float fp = 1.0;
+                float3 light_dir = input.world_pos.xyz - lights[i].pos_radius.xyz;
+            
+                float d1 = d;
+                float d2 = sp.z;
+                d1 *= fp;
+                float sssd = m_sss_scale * abs(d1 - d2) * 0.5 + 0.5;
+                            
+                float dd = -(sssd * sssd);
+                float3 profile = float3(0.233, 0.455, 0.649) * exp(dd / 0.0064) +
+                     float3(0.1,   0.336, 0.344) * exp(dd / 0.0484) +
+                     float3(0.118, 0.198, 0.0)   * exp(dd / 0.187)  +
+                     float3(0.113, 0.007, 0.007) * exp(dd / 0.567)  +
+                     float3(0.358, 0.004, 0.0)   * exp(dd / 1.99)   +
+                     float3(0.078, 0.0,   0.0)   * exp(dd / 7.41);
+                            
+                float sss = saturate(0.5 + dot(light_dir, n));
+                
+                profile *= albedo.rgb;
+                
+                lit_colour.rgb += profile * sss;
+                lit_colour += albedo.rgb * 0.15;
+            }
+            
+            ++shadow_map_index;
+        }
+        
+        // double oren nayar with back light
+		lit_colour += oren_nayar( 
+            lights[i].pos_radius * -1.0, 
+            lights[i].colour.rgb * 0.25,
+            n,
+            input.world_pos.xyz,
+            camera_view_pos.xyz,
+            1.0 - roughness,
+            albedo.rgb
+        );
+    }
+    
+    output.colour.rgb = lit_colour;
+    
+    return output;
+}
+
+ps_output ps_lambert( vs_output input )
+{
+	ps_output output;
+    
+    float4 albedo = sample_texture( diffuse_texture, input.texcoord.xy );
+    float3 normal_sample = sample_texture( normal_texture, input.texcoord.xy ).rgb;
+    float4 ro_sample = sample_texture( specular_texture, input.texcoord.xy );
+    float4 specular_sample = float4(1.0, 1.0, 1.0, 1.0);
+    
+    normal_sample = normal_sample * 2.0 - 1.0;
+
+    float3 n = transform_ts_normal( 
+        input.tangent, 
+        input.bitangent, 
+        input.normal, 
+        normal_sample );
+        
+    albedo *= input.colour;    
+    float3 lit_colour = float3( 0.0, 0.0, 0.0 );
+        
+    // double lambert
+    for(int i = 0; i < 1; ++i )
+    {                
+        lit_colour += lambert( 
+            lights[i].pos_radius, 
+            lights[i].colour.rgb,
+            n,
+            input.world_pos.xyz,
+            albedo.rgb
+        );
+        
+        lit_colour += lambert( 
+            lights[i].pos_radius * -1.0, 
+            lights[i].colour.rgb,
+            n,
+            input.world_pos.xyz,
+            albedo.rgb
+        ) * 0.2;
+    }
+    
+    output.colour.rgb = lit_colour;
+    output.colour.a = albedo.a;
+    return output;
+}
+
 pmfx:
 {    
-    "forward_lit":
+    omni_shadow:
     {
-        "vs": "vs_main",
-        "ps": "ps_forward_lit",
+        vs: vs_main_zonly_wp,
+        ps: ps_omni_shadow,
         
-        "permutations":
+        permutations:
         {
             "SKINNED": [31, [0,1]],
-            "INSTANCED": [30, [0,1]],
-            "UV_SCALE": [1, [0,1]],
-            "SSS": [2, [0,1]],
-            "SDF_SHADOW": [3, [0,1]]
-        },
-        
-        "constants":
-        {
-            "albedo"      : { "type": "float4", "widget": "colour", "default": [1.0, 1.0, 1.0, 1.0] },
-            "roughness"   : { "type": "float", "widget": "slider", "min": 0, "max": 1, "default": 0.5 },
-            "reflectivity": { "type": "float", "widget": "slider", "min": 0, "max": 1, "default": 0.3 },
-            
-            "permutation(SSS)":
-            {
-                "sss_scale": { "type": "float", "widget": "slider", "min": 0, "max": 500, "default": 1.0 }   
-            },
-            
-            "permutation(SDF_SHADOW)":
-            {
-                "surface_offset": { "type": "float", "widget": "slider", "min": 0, "max": 1, "default": 1.0 }   
-            },
-            
-            "permutation(UV_SCALE)":
-            {
-                "uv_scale": { "type": "float2", "widget": "slider", "min": 0, "max": 100, "default": 1.0 }   
-            }
-        },
-        
-        "texture_samplers": 
-        {
-            "albedo":
-            {
-                "type"   : "texture_2d",
-                "unit"   : 0,
-                "bind_flags" : ["ps"],
-                "sampler": "wrap_linear",
-                "default": "data/textures/defaults/albedo.dds"
-            },
-            
-            "normals":
-            {
-                "type"   : "texture_2d",
-                "unit"   : 1,
-                "bind_flags" : ["ps"],
-                "sampler": "wrap_linear",
-                "default": "data/textures/defaults/normal.dds"
-            },
-            
-            "roughness":
-            {
-                "type"   : "texture_2d",
-                "unit"   : 2,
-                "bind_flags" : ["ps"],
-                "sampler": "wrap_linear",
-                "default": "data/textures/defaults/spec.dds"
-            },
-            
-            "metalness":
-            {
-                "type"   : "texture_2d",
-                "unit"   : 3,
-                "bind_flags" : ["ps"],
-                "sampler": "wrap_linear",
-                "default": "data/textures/defaults/black.dds"
-            }
-        }
-    },
-    
-    "gbuffer":
-    {
-        "vs": "vs_main",
-        "ps": "ps_gbuffer",
-        
-        "permutations":
-        {
-            "SKINNED": [31, [0,1]],
-            "INSTANCED": [30, [0,1]],
-            "UV_SCALE": [1, [0,1]]
-        },
-        
-        "inherit_constants": ["forward_lit"]
-    },
-        
-    "zonly":
-    {
-        "vs": "vs_main_zonly",
-        "ps": "ps_null",
-        
-        "permutations":
-        {
             "INSTANCED": [30, [0,1]]
         }
     },
     
-    "pre_skin":
+    forward_lit:
     {
-        "vs"        : "vs_main_pre_skin",
-        "stream_out": "true"
-    }
+        vs: vs_main,
+        ps: ps_forward_lit,
+        
+        permutations:
+        {
+            SKINNED: [31, [0,1]],
+            INSTANCED: [30, [0,1]],
+            UV_SCALE: [1, [0,1]],
+            SDF_SHADOW: [3, [0,1]],
+            GI: [4, [0, 1]]
+        },
+        
+        constants:
+        {
+            albedo      : { type: float4, widget: colour, default: [1.0, 1.0, 1.0, 1.0] },
+            roughness   : { type: float, widget: slider, min: 0, max: 1, default: 0.5 },
+            reflectivity: { type: float, widget: slider, min: 0, max: 1, default: 0.3 },
+            
+            "permutation(SDF_SHADOW)":
+            {
+                surface_offset: { type: float, widget: slider, min: 0, max: 1, default: 1.0 }   
+            },
+            
+            "permutation(UV_SCALE)":
+            {
+                uv_scale: { type: float2, widget: slider, min: 0, max: 100, default: 1.0 }   
+            }
+        },
+        
+        texture_samplers: 
+        {
+            albedo:
+            {
+                type   : texture_2d,
+                unit   : 0,
+                bind_flags : [ps],
+                sampler: wrap_linear,
+                default: data/textures/defaults/albedo.dds
+            },
+            
+            normals:
+            {
+                type   : texture_2d,
+                unit   : 1,
+                bind_flags : [ps],
+                sampler: wrap_linear,
+                default: data/textures/defaults/normal.dds
+            },
+            
+            roughness:
+            {
+                type   : texture_2d,
+                unit   : 2,
+                bind_flags : [ps],
+                sampler: wrap_linear,
+                default: data/textures/defaults/spec.dds
+            },
+            
+            metalness:
+            {
+                type   : texture_2d,
+                unit   : 3,
+                bind_flags : [ps],
+                sampler: wrap_linear,
+                default: data/textures/defaults/black.dds
+            }
+        }
+    },
+    
+    simple_lighting:
+    {
+		vs: vs_main,
+        ps: ps_simple_lighting,
+        
+        permutations:
+        {
+            SKINNED: [31, [0,1]],
+            INSTANCED: [30, [0,1]],
+            SSS: [2, [0,1]]
+        },
+        
+		constants:
+        {
+            albedo       : { type: float4, widget: colour, default: [1.0, 1.0, 1.0, 1.0] },
+            roughness    : { type: float, widget: slider, min: 0, max: 1, default: 0.5 },
+            reflectivity : { type: float, widget: slider, min: 0, max: 1, default: 0.3 },
+            
+            "permutation(SSS)":
+            {
+                sss_scale: { type: float, widget: slider, min: 0, max: 500, default: 1.0 }   
+            },
+        }
+    },
+    
+    gbuffer:
+    {
+        vs: vs_main,
+        ps: ps_gbuffer,
+        
+        permutations:
+        {
+            SKINNED: [31, [0,1]],
+            INSTANCED: [30, [0,1]],
+            UV_SCALE: [1, [0,1]]
+        },
+        
+        inherit_constants: [forward_lit]
+    },
+        
+    zonly:
+    {
+        vs: vs_main_zonly,
+        ps: ps_null,
+        
+        permutations:
+        {
+            SKINNED: [31, [0,1]],
+            INSTANCED: [30, [0,1]]
+        }
+    },
+    
+    single_light_directional:
+    {
+        vs: vs_main,
+        ps: ps_single_light,
+                
+        constants:
+        {
+            albedo       : { type: float4, widget: colour, default: [1.0, 1.0, 1.0, 1.0] },
+            roughness    : { type: float, widget: slider, min: 0, max: 1, default: 0.5 },
+            reflectivity : { type: float, widget: slider, min: 0, max: 1, default: 0.3 }
+        }
+    },
+    
+    lambert:
+    {
+		vs: vs_main,
+        ps: ps_lambert,
+        
+        permutations:
+        {
+            SKINNED: [31, [0,1]],
+            INSTANCED: [30, [0,1]]
+        },
+        
+		constants:
+        {
+            albedo : { type: float4, widget: colour, default: [1.0, 1.0, 1.0, 1.0] }
+        }
+    },
+	
+	gi:
+    {
+        vs: vs_main,
+        ps: ps_single_light_diffuse,
+        
+        permutations:
+        {
+            SKINNED: [31, [0,1]],
+            INSTANCED: [30, [0,1]]
+        },
+		
+		inherit_constants: [forward_lit]
+    },
+    
+    pre_skin:
+    {
+        vs: vs_main_pre_skin,
+        stream_out: true
+    },
+    
+    shadow_extrude:
+    {
+        vs: vs_main_extrude,
+        ps: ps_dbg
+    },
 }
-
-
-

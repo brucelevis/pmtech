@@ -1,37 +1,24 @@
-#include "camera.h"
-#include "debug_render.h"
-#include "dev_ui.h"
-#include "ecs/ecs_editor.h"
-#include "ecs/ecs_resources.h"
-#include "ecs/ecs_scene.h"
-#include "ecs/ecs_utilities.h"
-#include "file_system.h"
-#include "forward_render.h"
-#include "hash.h"
-#include "input.h"
-#include "loader.h"
-#include "pen.h"
-#include "pen_json.h"
-#include "pen_string.h"
-#include "pmfx.h"
-#include "renderer.h"
-#include "str_utilities.h"
-#include "timer.h"
+#include "../example_common.h"
+#include "shader_structs/forward_render.h"
 
 using namespace put;
-using namespace ecs;
+using namespace put::ecs;
+using namespace forward_render;
 
-pen::window_creation_params pen_window{
-    1280,           // width
-    720,            // height
-    4,              // MSAA samples
-    "pmfx_renderer" // window title / process name
-};
-
-namespace physics
+namespace pen
 {
-    extern PEN_TRV physics_thread_main(void* params);
-}
+    pen_creation_params pen_entry(int argc, char** argv)
+    {
+        pen::pen_creation_params p;
+        p.window_width = 1280;
+        p.window_height = 720;
+        p.window_title = "pmfx_renderer";
+        p.window_sample_count = 4;
+        p.user_thread_function = user_setup;
+        p.flags = pen::e_pen_create_flags::renderer;
+        return p;
+    }
+} // namespace pen
 
 namespace
 {
@@ -48,72 +35,78 @@ namespace
     s32       render_method = 0;
 
     f32 user_thread_time = 0.0f;
-
-    void update_demo(ecs::ecs_scene* scene, f32 dt)
-    {
-        ImGui::Begin("Lighting", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
-        ImGui::SliderFloat("Light Radius", &light_radius, 0.0f, 300.0f);
-        ImGui::SliderInt("Lights", &num_lights, 0, max_lights);
-
-        if (ImGui::Combo("Method", &render_method, &render_methods[0], PEN_ARRAY_SIZE(render_methods)))
-        {
-            pmfx::set_view_set(render_methods[render_method]);
-        }
-
-        f32 render_gpu = 0.0f;
-        f32 render_cpu = 0.0f;
-        pen::renderer_get_present_time(render_cpu, render_gpu);
-
-        ImGui::Separator();
-        ImGui::Text("Stats:");
-        ImGui::Text("User Thread: %2.2f ms", user_thread_time);
-        ImGui::Text("Render Thread: %2.2f ms", render_cpu);
-        ImGui::Text("GPU: %2.2f ms", render_gpu);
-        ImGui::Separator();
-
-        ImGui::End();
-
-        static f32 t = 0.0f;
-        t += dt * 0.01f;
-
-        u32 lights_end = lights_start + num_lights;
-        u32 light_nodes_end = lights_start + max_lights;
-        u32 dir_index = 0;
-        for (u32 i = lights_start; i < light_nodes_end; ++i)
-        {
-            if (i >= lights_end)
-            {
-                scene->entities[i] &= ~CMP_LIGHT;
-                continue;
-            }
-
-            scene->transforms[i].translation += anim_dir[dir_index] * dt * 0.1f;
-            scene->entities[i] |= CMP_TRANSFORM;
-
-            for (u32 j = 0; j < 3; ++j)
-            {
-                if (fabs(scene->transforms[i].translation[j]) > scene_size)
-                {
-                    f32 rrx = (f32)(rand() % 255) / 255.0f;
-                    f32 rry = (f32)(rand() % 255) / 255.0f;
-                    f32 rrz = (f32)(rand() % 255) / 255.0f;
-
-                    anim_dir[dir_index] = vec3f(rrx, rry, rrz) * vec3f(2.0f) - vec3f(1.0);
-                    anim_dir[dir_index] +=
-                        normalised(vec3f(0.0f, scene_size / 2.0f, 0.0f) - scene->transforms[i].translation);
-                }
-            }
-
-            scene->entities[i] |= CMP_LIGHT;
-            scene->lights[i].radius = light_radius;
-
-            dir_index++;
-        }
-    }
 } // namespace
 
-void create_scene_objects(ecs::ecs_scene* scene, camera& main_camera)
+void example_update(ecs::ecs_scene* scene, camera& cam, f32 dt)
 {
+    // show dev ui for choice of deferred, fwd, zpp
+    put::dev_ui::enable(true);
+    
+    dt *= 5000.0f;
+
+    ImGui::Begin("Lighting", nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::SliderFloat("Light Radius", &light_radius, 0.0f, 300.0f);
+    ImGui::SliderInt("Lights", &num_lights, 0, max_lights);
+
+    if (ImGui::Combo("Method", &render_method, &render_methods[0], PEN_ARRAY_SIZE(render_methods)))
+    {
+        pmfx::set_view_set(render_methods[render_method]);
+    }
+
+    f32 render_gpu = 0.0f;
+    f32 render_cpu = 0.0f;
+    pen::renderer_get_present_time(render_cpu, render_gpu);
+
+    ImGui::Separator();
+    ImGui::Text("Stats:");
+    ImGui::Text("User Thread: %2.2f ms", user_thread_time);
+    ImGui::Text("Render Thread: %2.2f ms", render_cpu);
+    ImGui::Text("GPU: %2.2f ms", render_gpu);
+    ImGui::Separator();
+
+    ImGui::End();
+
+    static f32 t = 0.0f;
+    t += dt * 0.01f;
+
+    u32 lights_end = lights_start + num_lights;
+    u32 light_nodes_end = lights_start + max_lights;
+    u32 dir_index = 0;
+    for (u32 i = lights_start; i < light_nodes_end; ++i)
+    {
+        if (i >= lights_end)
+        {
+            scene->entities[i] &= ~e_cmp::light;
+            continue;
+        }
+
+        scene->transforms[i].translation += anim_dir[dir_index] * dt * 0.01f;
+        scene->entities[i] |= e_cmp::transform;
+
+        for (u32 j = 0; j < 3; ++j)
+        {
+            if (fabs(scene->transforms[i].translation[j]) > scene_size)
+            {
+                f32 rrx = (f32)(rand() % 255) / 255.0f;
+                f32 rry = (f32)(rand() % 255) / 255.0f;
+                f32 rrz = (f32)(rand() % 255) / 255.0f;
+
+                anim_dir[dir_index] = vec3f(rrx, rry, rrz) * vec3f(2.0f) - vec3f(1.0);
+                anim_dir[dir_index] += normalised(vec3f(0.0f, scene_size / 2.0f, 0.0f) - scene->transforms[i].translation);
+            }
+        }
+
+        scene->entities[i] |= e_cmp::light;
+        scene->lights[i].radius = light_radius;
+
+        dir_index++;
+    }
+}
+
+void example_setup(ecs::ecs_scene* scene, camera& main_camera)
+{
+    pmfx::init("data/configs/pmfx_demo.jsn");
+
     clear_scene(scene);
 
     // set camera start pos
@@ -136,6 +129,7 @@ void create_scene_objects(ecs::ecs_scene* scene, camera& main_camera)
     f32   s = -d * (f32)num_pillar_rows;
     vec3f start_pos = vec3f(s, pillar_size, s);
     vec3f pos = start_pos;
+
     for (s32 i = 0; i < num_pillar_rows; ++i)
     {
         pos.z = start_pos.z;
@@ -163,12 +157,12 @@ void create_scene_objects(ecs::ecs_scene* scene, camera& main_camera)
             inv_uv_snap = 1.0f / (uv_snap);
             pos = floor(pos * inv_uv_snap) * uv_snap;
 
-            u32 pillar = get_new_node(scene);
+            u32 pillar = get_new_entity(scene);
             scene->transforms[pillar].rotation = quat();
             scene->transforms[pillar].scale = vec3f(rx, ry, rz);
             scene->transforms[pillar].translation = pos;
             scene->parents[pillar] = pillar;
-            scene->entities[pillar] |= CMP_TRANSFORM;
+            scene->entities[pillar] |= e_cmp::transform;
             scene->names[pillar] = "pillar";
 
             instantiate_geometry(box_resource, scene, pillar);
@@ -197,12 +191,10 @@ void create_scene_objects(ecs::ecs_scene* scene, camera& main_camera)
 
         pos.x += d * 2.0f;
     }
-    
+
     static vec4f _pallete[] = {
-        vec4f(117.0f, 219.0f, 205.0f, 255.0f) / 255.0f,
-        vec4f(201.0f, 219.0f, 186.0f, 255.0f) / 255.0f,
-        vec4f(220.0f, 219.0f, 169.0f, 255.0f) / 255.0f,
-        vec4f(245.0f, 205.0f, 167.0f, 255.0f) / 255.0f,
+        vec4f(117.0f, 219.0f, 205.0f, 255.0f) / 255.0f, vec4f(201.0f, 219.0f, 186.0f, 255.0f) / 255.0f,
+        vec4f(220.0f, 219.0f, 169.0f, 255.0f) / 255.0f, vec4f(245.0f, 205.0f, 167.0f, 255.0f) / 255.0f,
         vec4f(250.0f, 163.0f, 129.0f, 255.0f) / 255.0f,
     };
 
@@ -218,10 +210,10 @@ void create_scene_objects(ecs::ecs_scene* scene, camera& main_camera)
 
         ImColor ii = ImColor::HSV((rand() % 255) / 255.0f, (rand() % 255) / 255.0f, (rand() % 255) / 255.0f);
         vec4f   col = normalised(vec4f(ii.Value.x, ii.Value.y, ii.Value.z, 1.0f));
-        
+
         col = _pallete[rand() % 5];
 
-        u32 light = get_new_node(scene);
+        u32 light = get_new_entity(scene);
         scene->names[light] = "light";
         scene->id_name[light] = PEN_HASH("light");
 
@@ -233,129 +225,16 @@ void create_scene_objects(ecs::ecs_scene* scene, camera& main_camera)
         scene->transforms[light].rotation = quat();
         scene->transforms[light].rotation.euler_angles(rrx, rry, rrz);
         scene->transforms[light].scale = vec3f::one();
-        scene->entities[light] |= CMP_TRANSFORM;
+        scene->entities[light] |= e_cmp::transform;
 
+        instantiate_light(scene, light);
         scene->lights[light].colour = col.xyz;
         scene->lights[light].radius = light_radius;
-        scene->lights[light].type = LIGHT_TYPE_POINT;
-        instantiate_light(scene, light);
+        scene->lights[light].type = e_light_type::point;
 
         anim_dir[i] = vec3f(rrx, rry, rrz) * vec3f(2.0f) - vec3f(1.0);
 
         if (i == 0)
             lights_start = light;
     }
-}
-
-PEN_TRV pen::user_entry(void* params)
-{
-    // unpack the params passed to the thread and signal to the engine it ok to proceed
-    pen::job_thread_params* job_params = (pen::job_thread_params*)params;
-    pen::job*               p_thread_info = job_params->job_info;
-    pen::semaphore_post(p_thread_info->p_sem_continue, 1);
-
-    pen::jobs_create_job(physics::physics_thread_main, 1024 * 10, nullptr, pen::THREAD_START_DETACHED);
-
-    put::dev_ui::init();
-    put::dbg::init();
-
-    // create main camera and controller
-    put::camera main_camera;
-    put::camera_create_perspective(&main_camera, 60.0f, put::k_use_window_aspect, 0.1f, 1000.0f);
-
-    put::scene_controller cc;
-    cc.camera = &main_camera;
-    cc.update_function = &ecs::update_model_viewer_camera;
-    cc.name = "model_viewer_camera";
-    cc.id_name = PEN_HASH(cc.name.c_str());
-
-    // create the main scene and controller
-    put::ecs::ecs_scene* main_scene = put::ecs::create_scene("main_scene");
-    put::ecs::editor_init(main_scene);
-
-    put::scene_controller sc;
-    sc.scene = main_scene;
-    sc.update_function = &ecs::update_model_viewer_scene;
-    sc.name = "main_scene";
-    sc.camera = &main_camera;
-    sc.id_name = PEN_HASH(sc.name.c_str());
-
-    // create view renderers
-    put::scene_view_renderer svr_main;
-    svr_main.name = "ces_render_scene";
-    svr_main.id_name = PEN_HASH(svr_main.name.c_str());
-    svr_main.render_function = &ecs::render_scene_view;
-
-    put::scene_view_renderer svr_editor;
-    svr_editor.name = "ces_render_editor";
-    svr_editor.id_name = PEN_HASH(svr_editor.name.c_str());
-    svr_editor.render_function = &ecs::render_scene_editor;
-
-    put::scene_view_renderer svr_light_volumes;
-    svr_light_volumes.name = "ces_render_light_volumes";
-    svr_light_volumes.id_name = PEN_HASH(svr_light_volumes.name.c_str());
-    svr_light_volumes.render_function = &ecs::render_light_volumes;
-
-    pmfx::register_scene_view_renderer(svr_main);
-    pmfx::register_scene_view_renderer(svr_editor);
-    pmfx::register_scene_view_renderer(svr_light_volumes);
-
-    pmfx::register_scene_controller(sc);
-    pmfx::register_scene_controller(cc);
-
-    pmfx::init("data/configs/pmfx_demo.jsn");
-
-    create_scene_objects(main_scene, main_camera);
-
-    f32 frame_time = 0.0f;
-
-    while (1)
-    {
-        static u32 frame_timer = pen::timer_create("frame_timer");
-        pen::timer_start(frame_timer);
-
-        put::dev_ui::new_frame();
-
-        update_demo(main_scene, (f32)frame_time);
-
-        pmfx::update();
-
-        pmfx::render();
-
-        pmfx::show_dev_ui();
-
-        put::dev_ui::render();
-
-        frame_time = pen::timer_elapsed_ms(frame_timer);
-        user_thread_time = frame_time;
-
-        pen::renderer_present();
-
-        // for unit test
-        pen::renderer_test_run();
-
-        pen::renderer_consume_cmd_buffer();
-
-        pmfx::poll_for_changes();
-        put::poll_hot_loader();
-
-        // msg from the engine we want to terminate
-        if (pen::semaphore_try_wait(p_thread_info->p_sem_exit))
-            break;
-    }
-
-    ecs::destroy_scene(main_scene);
-    ecs::editor_shutdown();
-
-    // clean up mem here
-    put::pmfx::shutdown();
-    put::dbg::shutdown();
-    put::dev_ui::shutdown();
-
-    pen::renderer_consume_cmd_buffer();
-
-    // signal to the engine the thread has finished
-    pen::semaphore_post(p_thread_info->p_sem_terminated, 1);
-
-    return PEN_THREAD_OK;
 }

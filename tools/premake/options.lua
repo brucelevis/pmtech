@@ -6,9 +6,10 @@ newoption
    description = "Choose a renderer",
    allowed = 
    {
-      { "opengl", "OpenGL (macOS, linux, iOS, Android)" },
+      { "opengl", "OpenGL (macOS, linux, Android)" },
       { "dx11",  "DirectX 11 (Windows only)" },
-      { "metal", "Metal (macOS, iOS only)" }
+      { "metal", "Metal (macOS, iOS only)" },
+      { "vulkan", "Vulkan (Windows, linux)" }
    }
 }
 
@@ -43,6 +44,13 @@ newoption
       { "osx", "OSX" },
       { "ios",  "iOS" },
    }
+}
+
+newoption
+{
+	trigger     = "teamid",
+	value	    = "id",
+	description = "development team id for apple developers"
 }
 
 newoption 

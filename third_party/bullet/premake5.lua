@@ -1,11 +1,8 @@
 dofile("../../tools/premake/options.lua")
 dofile("../../tools/premake/globals.lua")
 
-if _ACTION == "vs2017" or _ACTION == "vs2015" then
-	platform_dir = _ACTION
-end
-
 link_cmd = ""
+build_cmd = ""
 if platform_dir == "osx" then
 	link_cmd = "-mmacosx-version-min=10.8"
 end
@@ -16,22 +13,19 @@ solution "bullet_build"
 	
 -- Project	
 project "bullet_monolithic"
+	setup_env()
 	location ("build\\" .. platform_dir)
 	kind "StaticLib"
 	language "C++"
-	
-	libdirs
-	{ 
-
-	}
 	
 	includedirs
 	{ 
 		"src\\", 
 	}
 	
-	if _ACTION == "vs2017" or _ACTION == "vs2015" then
+	if _ACTION == "vs2017" or _ACTION == "vs2015" or ACTION == "vs2019" then
 		systemversion(windows_sdk_version())
+		disablewarnings { "4267", "4305", "4244" }
 	end
 	
 	setup_env()
@@ -52,17 +46,18 @@ project "bullet_monolithic"
 				
 	configuration "Debug"
 		defines { "DEBUG" }
-		flags { "WinMain" }
+		entrypoint "WinMainCRTStartup"
 		linkoptions { link_cmd }
+		buildoptions { build_cmd }
 		symbols "On"
 		targetdir ("lib/" .. platform_dir)
 		targetname "bullet_monolithic_d"
-		architecture "x64"
  
 	configuration "Release"
 		defines { "NDEBUG" }
-		flags { "WinMain", "OptimizeSpeed" }
+		entrypoint "WinMainCRTStartup"
+		optimize "Speed"
 		linkoptions { link_cmd }
+		buildoptions { build_cmd }
 		targetdir ("lib/" .. platform_dir)
 		targetname "bullet_monolithic"
-		architecture "x64"

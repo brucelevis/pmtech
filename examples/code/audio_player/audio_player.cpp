@@ -1,78 +1,119 @@
-#include "audio.h"
+#include "audio/audio.h"
 #include "debug_render.h"
 #include "dev_ui.h"
-#include "file_system.h"
 #include "loader.h"
+
+#include "file_system.h"
 #include "memory.h"
 #include "pen.h"
 #include "pen_string.h"
 #include "renderer.h"
 #include "threads.h"
 #include "timer.h"
+
 #include <vector>
 
-pen::window_creation_params pen_window{
-    1280,          // width
-    720,           // height
-    4,             // MSAA samples
-    "audio_player" // window title / process name
-};
-
-u32 clear_state_grey;
-u32 raster_state_cull_back;
-
-pen::viewport vp = {0.0f, 0.0f, 1280.0f, 720.0f, 0.0f, 1.0f};
-
-u32 default_depth_stencil_state;
-
-void renderer_state_init()
-{
-    // create 2 clear states one for the render target and one for the main screen, so we can see the difference
-    static pen::clear_state cs = {
-        0.5f, 0.5f, 0.5f, 0.5f, 1.0f, 0x00, PEN_CLEAR_COLOUR_BUFFER | PEN_CLEAR_DEPTH_BUFFER,
-    };
-
-    clear_state_grey = pen::renderer_create_clear_state(cs);
-
-    // raster state
-    pen::rasteriser_state_creation_params rcp;
-    pen::memory_zero(&rcp, sizeof(pen::rasteriser_state_creation_params));
-    rcp.fill_mode = PEN_FILL_SOLID;
-    rcp.cull_mode = PEN_CULL_BACK;
-    rcp.depth_bias_clamp = 0.0f;
-    rcp.sloped_scale_depth_bias = 0.0f;
-    rcp.depth_clip_enable = true;
-
-    raster_state_cull_back = pen::renderer_create_rasterizer_state(rcp);
-
-    // depth stencil state
-    pen::depth_stencil_creation_params depth_stencil_params = {0};
-
-    // Depth test parameters
-    depth_stencil_params.depth_enable = true;
-    depth_stencil_params.depth_write_mask = 1;
-    depth_stencil_params.depth_func = PEN_COMPARISON_ALWAYS;
-
-    default_depth_stencil_state = pen::renderer_create_depth_stencil_state(depth_stencil_params);
-}
+using namespace pen;
+using namespace put;
 
 void audio_player_update();
 
-PEN_TRV pen::user_entry(void* params)
+namespace
 {
-    // unpack the params passed to the thread and signal to the engine it ok to proceed
-    pen::job_thread_params* job_params = (pen::job_thread_params*)params;
-    pen::job*               p_thread_info = job_params->job_info;
-    pen::semaphore_post(p_thread_info->p_sem_continue, 1);
+    void*   user_setup(void* params);
+    loop_t  user_update();
+    void    user_shutdown();
+}
 
-    pen::jobs_create_job(put::audio_thread_function, 1024 * 10, nullptr, pen::THREAD_START_DETACHED);
-
-    renderer_state_init();
-
-    put::dev_ui::init();
-
-    while (1)
+namespace pen
+{
+    pen_creation_params pen_entry(int argc, char** argv)
     {
+        pen::pen_creation_params p;
+        p.window_width = 1280;
+        p.window_height = 720;
+        p.window_title = "audio_player";
+        p.window_sample_count = 4;
+        p.user_thread_function = user_setup;
+        p.flags = pen::e_pen_create_flags::renderer;
+        return p;
+    }
+} // namespace pen
+
+namespace
+{
+    job_thread_params*  job_params;
+    job*                p_thread_info;
+    u32                 clear_state_grey;
+    u32                 raster_state_cull_back;
+    u32                 default_depth_stencil_state;
+
+    void renderer_state_init()
+    {
+        // create 2 clear states one for the render target and one for the main screen, so we can see the difference
+        static pen::clear_state cs = {
+            0.5f, 0.5f, 0.5f, 0.5f, 1.0f, 0x00, PEN_CLEAR_COLOUR_BUFFER | PEN_CLEAR_DEPTH_BUFFER,
+        };
+
+        clear_state_grey = pen::renderer_create_clear_state(cs);
+
+        // raster state
+        pen::rasteriser_state_creation_params rcp;
+        pen::memory_zero(&rcp, sizeof(pen::rasteriser_state_creation_params));
+        rcp.fill_mode = PEN_FILL_SOLID;
+        rcp.cull_mode = PEN_CULL_BACK;
+        rcp.depth_bias_clamp = 0.0f;
+        rcp.sloped_scale_depth_bias = 0.0f;
+        rcp.depth_clip_enable = true;
+
+        raster_state_cull_back = pen::renderer_create_rasterizer_state(rcp);
+
+        // depth stencil state
+        pen::depth_stencil_creation_params depth_stencil_params = {0};
+
+        // Depth test parameters
+        depth_stencil_params.depth_enable = true;
+        depth_stencil_params.depth_write_mask = 1;
+        depth_stencil_params.depth_func = PEN_COMPARISON_ALWAYS;
+
+        default_depth_stencil_state = pen::renderer_create_depth_stencil_state(depth_stencil_params);
+    }
+
+    void* user_setup(void* params)
+    {
+        // unpack the params passed to the thread and signal to the engine it ok to proceed
+        job_params = (pen::job_thread_params*)params;
+        p_thread_info = job_params->job_info;
+        pen::semaphore_post(p_thread_info->p_sem_continue, 1);
+        
+        pen::jobs_create_job(put::audio_thread_function, 1024 * 10, nullptr, pen::e_thread_start_flags::detached);
+        renderer_state_init();
+        put::dev_ui::init();
+		
+        pen_main_loop(user_update);
+        return PEN_THREAD_OK;
+    }
+
+    void user_shutdown()
+    {
+    	pen::renderer_new_frame();
+     
+        dev_ui::shutdown();
+        
+        pen::renderer_release_clear_state(clear_state_grey);
+        pen::renderer_release_raster_state(raster_state_cull_back);
+        pen::renderer_release_depth_stencil_state(default_depth_stencil_state);
+    	
+        pen::renderer_present();
+        pen::renderer_consume_cmd_buffer();
+        
+        pen::semaphore_post(p_thread_info->p_sem_terminated, 1);
+    }
+
+    loop_t user_update()
+    {
+        pen::renderer_new_frame();
+
         put::dev_ui::new_frame();
 
         pen::renderer_set_rasterizer_state(raster_state_cull_back);
@@ -80,6 +121,7 @@ PEN_TRV pen::user_entry(void* params)
         // bind back buffer and clear
         pen::renderer_set_depth_stencil_state(default_depth_stencil_state);
 
+        viewport vp = {0.0f, 0.0f, PEN_BACK_BUFFER_RATIO, 1.0f, 0.0f, 1.0f};
         pen::renderer_set_viewport(vp);
         pen::renderer_set_scissor_rect(rect{vp.x, vp.y, vp.width, vp.height});
         pen::renderer_set_targets(PEN_BACK_BUFFER_COLOUR, PEN_BACK_BUFFER_DEPTH);
@@ -87,28 +129,20 @@ PEN_TRV pen::user_entry(void* params)
 
         audio_player_update();
 
-        // present
         put::dev_ui::render();
-
+        
         pen::renderer_present();
-
         pen::renderer_consume_cmd_buffer();
-
-        put::audio_consume_command_buffer();
-
+        
         // msg from the engine we want to terminate
         if (pen::semaphore_try_wait(p_thread_info->p_sem_exit))
         {
-            break;
+            user_shutdown();
+            pen_main_loop_exit();
         }
+        
+        pen_main_loop_continue();
     }
-
-    // clean up mem here
-
-    // signal to the engine the thread has finished
-    pen::semaphore_post(p_thread_info->p_sem_terminated, 1);
-
-    return PEN_THREAD_OK;
 }
 
 enum playback_deck_flags : s32
@@ -435,6 +469,13 @@ class spectrum_analyser
         }
     }
 
+    void show_panel()
+    {
+        u32 display_analysis_loc = new_anlysis_loc;
+        ImGui::PlotLines("Per Sample Differentiation", &raw_diff[display_analysis_loc][0], current_display_samples, 0, NULL,
+                         -1.0f, 1.0f, ImVec2(530, 100));
+    }
+
     void show_window()
     {
         ImGui::Begin("Spectrum Analyser");
@@ -648,6 +689,8 @@ class playback_deck
 
         fame_time = timestamp - prev_time;
 
+        sa.show_panel();
+
         // file info
         ImGui::PushID(this);
         if (ImGui::Button("Open"))
@@ -657,7 +700,7 @@ class playback_deck
 
         if (open_file)
         {
-            const c8* file = put::dev_ui::file_browser(open_file, put::dev_ui::FB_OPEN, 2, "**.mp3", "**.wav");
+            const c8* file = put::dev_ui::file_browser(open_file, dev_ui::e_file_browser_flags::open, 2, "**.mp3", "**.wav");
 
             if (file != nullptr)
             {
@@ -706,7 +749,7 @@ class playback_deck
         }
 
         // transport controls
-        if (channel_state.play_state == put::NOT_PLAYING || channel_index == 0)
+        if (channel_state.play_state == e_audio_play_state::not_playing || channel_index == 0)
         {
             if (ImGui::Button("Play"))
             {
@@ -715,7 +758,7 @@ class playback_deck
                 flags &= ~(PAUSE_FFT_UPDATE | CUE);
             }
         }
-        else if (group_state.play_state == put::PLAYING)
+        else if (group_state.play_state == e_audio_play_state::playing)
         {
             if (ImGui::Button("Pause"))
             {
@@ -723,7 +766,7 @@ class playback_deck
                 flags |= PAUSE_FFT_UPDATE;
             }
         }
-        else if (group_state.play_state == put::PAUSED)
+        else if (group_state.play_state == e_audio_play_state::paused)
         {
             if (ImGui::Button("Play"))
             {
@@ -787,30 +830,30 @@ class playback_deck
 
         switch (group_state.play_state)
         {
-            case put::PLAYING:
+            case e_audio_play_state::playing:
                 ImGui::Text("%s", "Playing");
                 break;
 
-            case put::NOT_PLAYING:
+            case e_audio_play_state::not_playing:
                 ImGui::Text("%s", "Not Playing");
                 break;
 
-            case put::PAUSED:
+            case e_audio_play_state::paused:
                 ImGui::Text("%s", "Paused");
                 break;
         }
 
         switch (channel_state.play_state)
         {
-            case put::PLAYING:
+            case e_audio_play_state::playing:
                 ImGui::Text("%s", "Channel Playing");
                 break;
 
-            case put::NOT_PLAYING:
+            case e_audio_play_state::not_playing:
                 ImGui::Text("%s", "Channel Not Playing");
                 break;
 
-            case put::PAUSED:
+            case e_audio_play_state::paused:
                 ImGui::Text("%s", "Channel Paused");
                 break;
         }
@@ -904,15 +947,16 @@ void audio_player_update()
             mixer_channels[i].group_index = decks[i].group_index;
 
             // create sound spectrum dsp
-            decks[i].spectrum_dsp = put::audio_add_dsp_to_group(decks[i].group_index, put::DSP_FFT);
-            mixer_channels[i].three_band_eq_dsp = put::audio_add_dsp_to_group(decks[i].group_index, put::DSP_THREE_BAND_EQ);
-            mixer_channels[i].gain_dsp = put::audio_add_dsp_to_group(decks[i].group_index, put::DSP_GAIN);
+            decks[i].spectrum_dsp = put::audio_add_dsp_to_group(decks[i].group_index, e_dsp::fft);
+            mixer_channels[i].three_band_eq_dsp = put::audio_add_dsp_to_group(decks[i].group_index, e_dsp::three_band_eq);
+            mixer_channels[i].gain_dsp = put::audio_add_dsp_to_group(decks[i].group_index, e_dsp::gain);
         }
 
         initialised = true;
     }
 
     bool open = true;
+    ImGui::SetNextWindowSize(ImVec2(1000, 400), ImGuiSetCond_FirstUseEver);
     ImGui::Begin("Player", &open);
 
     ImGui::Columns(num_decks + 1, "decks");

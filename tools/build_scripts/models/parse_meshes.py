@@ -1,5 +1,6 @@
 import models.helpers as helpers
 import struct
+import json
 
 schema = "{http://www.collada.org/2005/11/COLLADASchema}"
 
@@ -55,16 +56,39 @@ class geometry_mesh:
     index_buffer = []
     min_extents = []
     max_extents = []
-    collision_vertices = []
     controller = None
 
-    semantic_ids = ["POSITION", "NORMAL", "TEXCOORD0", "TEXCOORD1", "TEXTANGENT1", "TEXBINORMAL1", "BLENDINDICES", "BLENDWEIGHTS"]
+    semantic_ids = [
+        "POSITION",
+        "NORMAL",
+        "TEXCOORD0",
+        "TEXCOORD1",
+        "TEXTANGENT1",
+        "TEXBINORMAL1",
+        "BLENDINDICES",
+        "BLENDWEIGHTS"
+    ]
+    alt_ids = [
+        "",
+        "",
+        "",
+        "",
+        "TEXTANGENT0",
+        "TEXBINORMAL0",
+        "",
+        ""
+    ]
     required_elements = [True, True, True, True, True, True, False, False]
     vertex_elements = []
 
-    def get_element_stream(self,sem_id):
+    def get_element_stream(self, sem_id):
         index = 0
         for s in self.semantic_ids:
+            if s == sem_id:
+                return self.vertex_elements[index]
+            index += 1
+        index = 0
+        for s in self.alt_ids:
             if s == sem_id:
                 return self.vertex_elements[index]
             index += 1
@@ -79,7 +103,6 @@ class geometry_mesh:
         self.vertex_buffer = []
         self.max_extents = []
         self.min_extents = []
-        self.collision_vertices = []
         self.vertex_elements = []
 
         index = 0
@@ -100,8 +123,7 @@ def add_vertex_input(input_node, vertex_input_instance):
     set = input_node.get("set")
     if set == None:
         set = ""
-
-    vertex_input_instance.semantic_ids.append(input_node.get("semantic") + set )
+    vertex_input_instance.semantic_ids.append(input_node.get("semantic") + set)
     src_str = input_node.get("source")
     src_str = src_str.replace("#", "")
     vertex_input_instance.source_ids.append(src_str)
@@ -131,7 +153,7 @@ def write_source_float_channel(p, src, sem_id, mesh):
     if stream != None:
         base_p = int(p) * int(src.stride)
         # always write 4 values per source / semantic so they occupy 1 vector register
-        #if sem_id == "POSITION" or sem_id == "NORMAL" or sem_id == "TEXTANGENT1" or sem_id == "TEXBINORMAL1":
+        # if sem_id == "POSITION" or sem_id == "NORMAL" or sem_id == "TEXTANGENT1" or sem_id == "TEXBINORMAL1":
 
         # correct cordspace
         vals = [0.0, 0.0, 0.0, 1.0]
@@ -158,100 +180,9 @@ def write_source_float_channel(p, src, sem_id, mesh):
             grow_extents([cval_x, cval_y, cval_z], mesh)
 
 
-def write_vertex_data(p, src_id, sem_id, mesh):
-    source_index = mesh.triangle_indices[int(p)]
-
-    # find source
-    for src in mesh.sources:
-        if src.id == src_id:
-            write_source_float_channel(source_index, src, sem_id, mesh)
-            return
-
-    # look in vertex list
-    # This is the vertex position buffer
-    for v in mesh.vertices:
-        if v.id == src_id:
-            itr = 0
-            for v_src in v.source_ids:
-                for src in mesh.sources:
-                    if v_src == src.id:
-                        write_source_float_channel(source_index, src, v.semantic_ids[itr], mesh)
-                        # also write WEIGHTS and JOINTS if we need them
-                        if mesh.controller != None:
-                            write_source_float_channel(source_index, mesh.controller.vec4_indices, "BLENDINDICES", mesh)
-                            write_source_float_channel(source_index, mesh.controller.vec4_weights, "BLENDWEIGHTS", mesh)
-                itr = itr + 1
-
-
-def generate_vertex_buffer(mesh):
-    index_stride = 0
-    for v in mesh.triangle_inputs:
-        for o in v.offsets:
-            if (o != None):
-                index_stride = max(int(o) + 1, index_stride)
-
-    p = 0
-    while p < len(mesh.triangle_indices):
-        for v in mesh.triangle_inputs:
-            for s in range(0, len(v.source_ids), 1):
-                write_vertex_data(p + int(v.offsets[s]), v.source_ids[s], v.semantic_ids[s], mesh)
-        p += index_stride
-
-    # interleave streams
-    num_floats = len(mesh.vertex_elements[0].float_values)
-
-    for stream in mesh.vertex_elements:
-        stream_len = len(stream.float_values)
-        if stream_len != num_floats and stream_len > 0:
-            print("error mismatched vertex size : ")
-            print(stream.semantic_id + " is " + str(stream_len) + " should be " + str(num_floats))
-
-    # pad out required streams
-    for i in range(0, len(mesh.semantic_ids)):
-        if len(mesh.vertex_elements[i].float_values) == 0 and mesh.required_elements[i]:
-            for j in range(0, num_floats):
-                mesh.vertex_elements[i].float_values.append(0.0)
-
-    for i in range(0, num_floats, 4):
-        for f in range(0, 4, 1):
-            # write vertex always
-            mesh.vertex_buffer.append(mesh.vertex_elements[0].float_values[i+f])
-        if len(mesh.vertex_elements[1].float_values) == num_floats:
-            # write normal
-            for f in range(0, 4, 1):
-                mesh.vertex_buffer.append(mesh.vertex_elements[1].float_values[i+f])
-        if len(mesh.vertex_elements[2].float_values) == num_floats \
-                and len(mesh.vertex_elements[3].float_values) == num_floats:
-            # texcoord 0 and 1 packed
-            for f in range(0, 2, 1):
-                mesh.vertex_buffer.append(mesh.vertex_elements[2].float_values[i+f])
-            for f in range(0, 2, 1):
-                mesh.vertex_buffer.append(mesh.vertex_elements[3].float_values[i+f])
-        elif len(mesh.vertex_elements[2].float_values) == num_floats:
-            for f in range(0, 4, 1):
-                # texcoord 0
-                mesh.vertex_buffer.append(mesh.vertex_elements[2].float_values[i+f])
-        if len(mesh.vertex_elements[4].float_values) == num_floats:
-            # write textangent
-            for f in range(0, 4, 1):
-                mesh.vertex_buffer.append(mesh.vertex_elements[4].float_values[i+f])
-        if len(mesh.vertex_elements[5].float_values) == num_floats:
-            # write texbinormal
-            for f in range(0, 4, 1):
-                mesh.vertex_buffer.append(mesh.vertex_elements[5].float_values[i+f])
-        if len(mesh.vertex_elements[6].float_values) == num_floats:
-            # write blendindices
-            for f in range(0, 4, 1):
-                mesh.vertex_buffer.append(mesh.vertex_elements[6].float_values[i+f])
-        if len(mesh.vertex_elements[7].float_values) == num_floats:
-            # write blendweights
-            for f in range(0, 4, 1):
-                mesh.vertex_buffer.append(mesh.vertex_elements[7].float_values[i+f])
-
-
 def generate_index_buffer(mesh):
     mesh.index_buffer = []
-    vert_count = int(len(mesh.vertex_buffer)) / (int(4) * int(5))
+    vert_count = int(len(mesh.vertex_elements[0].float_values) / 4)
     for i in range(0, int(vert_count), 3):
         mesh.index_buffer.append(i + 2)
         mesh.index_buffer.append(i + 1)
@@ -275,13 +206,21 @@ def parse_mesh(node, tris, controller):
                 geom_src.float_values.append(vf)
         mesh_instance.sources.append(geom_src)
 
+    stream = dict()
+    stream["buffer"] = list()
+
     # find vertex struct
     for v in node.iter(schema + 'vertices'):
-        vertex_instance = vertex_input()
-        vertex_instance.id = v.get("id")
+        stream[v.get("id")] = list()
         for i in v.iter(schema + 'input'):
+            vertex_instance = vertex_input()
+            vertex_instance.id = v.get("id")
             add_vertex_input(i, vertex_instance)
-        mesh_instance.vertices.append(vertex_instance)
+            mesh_instance.vertices.append(vertex_instance)
+            stream[v.get("id")].append({
+                "src": i.get("source").strip("#"),
+                "semantic": i.get("semantic")
+            })
 
     # find triangles (multi stream index buffers)
     mesh_instance.triangle_count = tris.get("count")
@@ -290,6 +229,12 @@ def parse_mesh(node, tris, controller):
         vertex_instance.id = i.get("id")
         add_vertex_input(i, vertex_instance)
         mesh_instance.triangle_inputs.append(vertex_instance)
+        stream["buffer"].append({
+            "src": i.get("source").strip("#"),
+            "offset": i.get("offset"),
+            "semantic": i.get("semantic"),
+            "set": i.get("set")
+        })
 
     # find indices
     for indices in tris.iter(schema + 'p'):
@@ -297,13 +242,205 @@ def parse_mesh(node, tris, controller):
         for vi in splitted:
             mesh_instance.triangle_indices.append(vi)
 
+    # extract semantics mapped to data streams
+    unpack_streams = dict()
+    for s in stream["buffer"]:
+        if s["src"] in stream.keys():
+            for vs in stream[s["src"]]:
+                vs["offset"] = s["offset"]
+                unpack_streams[vs["semantic"]] = vs
+        else:
+            unpack_streams[s["semantic"]] = s
+
+    # find data streams
+    _data = dict()
+    for s in unpack_streams:
+        stream = unpack_streams[s]
+        for source in node.iter(schema + 'source'):
+            if source.get("id").find(stream["src"]) != -1:
+                for data in source.iter(schema + 'float_array'):
+                    stream["data_count"] = data.get("count")
+                    _data[s] = data.text.split(" ")
+                    for accessor in source.iter(schema + 'accessor'):
+                        stream["stride"] = accessor.get("stride")
+
+    buffer_dict = dict()
+    buffer_dict["data"] = _data
+    buffer_dict["streams"] = unpack_streams
+
     # roll the multi stream vertex buffer into 1
-    generate_vertex_buffer(mesh_instance)
+    generate_vertex_buffer(mesh_instance, buffer_dict)
 
     # wind triangles the other way
     generate_index_buffer(mesh_instance)
 
     return mesh_instance
+
+
+def write_vertex_data(p, src_id, sem_id, mesh):
+    source_index = mesh.triangle_indices[int(p)]
+
+    # find source
+    for src in mesh.sources:
+        if src.id == src_id:
+            write_source_float_channel(source_index, src, sem_id, mesh)
+            return
+
+    # look in vertex list
+    # This is the vertex position buffer
+    for v in mesh.vertices:
+        if v.id == src_id:
+            itr = 0
+            for v_src in v.source_ids:
+                for src in mesh.sources:
+                    if v_src == src.id:
+                        write_source_float_channel(source_index, src, v.semantic_ids[itr], mesh)
+                itr = itr + 1
+        # also write WEIGHTS and JOINTS if we need them
+        if mesh.controller != None:
+            write_source_float_channel(source_index, mesh.controller.vec4_indices, "BLENDINDICES", mesh)
+            write_source_float_channel(source_index, mesh.controller.vec4_weights, "BLENDWEIGHTS", mesh)
+
+
+def swizzle_vertex(semantic, v):
+    swizzle = [
+        "POSITION",
+        "NORMAL",
+        "TEXTANGENT",
+        "TEXBINORMAL"
+    ]
+    if semantic in swizzle:
+        if helpers.author == "Max":
+            vv = [
+                float(v[0]),
+                float(v[2]),
+                float(v[1]) * -1.0
+            ]
+            return vv
+    return v
+
+
+def generate_vertex_buffer(mesh, buffer_dict):
+    index_stride = 0
+    for v in mesh.triangle_inputs:
+        for o in v.offsets:
+            if (o != None):
+                index_stride = max(int(o) + 1, index_stride)
+
+    # old
+    p = 0
+    while p < len(mesh.triangle_indices):
+        for v in mesh.triangle_inputs:
+            for s in range(0, len(v.source_ids), 1):
+                write_vertex_data(p + int(v.offsets[s]), v.source_ids[s], v.semantic_ids[s], mesh)
+        p += index_stride
+
+    # new
+    '''
+    semantic_index = {
+        "POSITION": 0,
+        "NORMAL": 1,
+        "TEXCOORD": 2,
+        "TEXCOORD1": 3,
+        "TEXTANGENT": 4,
+        "TEXBINORMAL": 5,
+        "BLENDINDICES": 6,
+        "BLENDWEIGHTS": 7
+    }
+    p = 0
+    for sem in semantic_index:
+        mesh.vertex_elements[semantic_index[sem]].float_values = []
+    while p < len(mesh.triangle_indices):
+        for s in buffer_dict["streams"]:
+            stream = buffer_dict["streams"][s]
+            data = buffer_dict["data"][s]
+            ii = semantic_index[s]
+            stride = int(stream["stride"])
+            offset = int(stream["offset"])
+            pi = int(mesh.triangle_indices[p + offset])
+            bp = pi * stride
+            vv = swizzle_vertex(s, data[bp:bp+3])
+            for si in range(0, stride):
+                mesh.vertex_elements[ii].float_values.append(vv[si])
+            for si in range(stride, 4):
+                mesh.vertex_elements[ii].float_values.append("1.0")
+            if s == "POSITION":
+                v = []
+                for vi in range(0, 3):
+                    v.append(float(data[bp+vi]))
+                grow_extents(v, mesh)
+        if mesh.controller:
+            i1 = semantic_index["BLENDINDICES"]
+            i2 = semantic_index["BLENDWEIGHTS"]
+            s1 = mesh.controller.vec4_indices.float_values
+            s2 = mesh.controller.vec4_weights.float_values
+            pi = int(mesh.triangle_indices[p])
+            bp = pi * 4
+            for i in range(0, int(4)):
+                mesh.vertex_elements[i1].float_values.append(s1[bp + i])
+                mesh.vertex_elements[i2].float_values.append(s2[bp + i])
+        p += index_stride
+    '''
+
+    # interleave streams
+    num_floats = len(mesh.vertex_elements[0].float_values)
+
+    elem_stride = []
+    for stream in mesh.vertex_elements:
+        stride = 0
+        stream_len = len(stream.float_values)
+        if stream_len == num_floats:
+            stride = 1
+        elif stream_len > 0:
+            print("error: mismatched vertex size")
+            print(stream.semantic_id + " is " + str(stream_len) + " should be " + str(num_floats))
+            if stream_len % num_floats == 0:
+                stride = int(stream_len / num_floats)
+        elem_stride.append(stride)
+
+    # pad out required streams
+    for i in range(0, len(mesh.semantic_ids)):
+        if len(mesh.vertex_elements[i].float_values) == 0 and mesh.required_elements[i]:
+            for j in range(0, num_floats):
+                mesh.vertex_elements[i].float_values.append(0.0)
+
+    for i in range(0, num_floats, 4):
+        for f in range(0, 4, 1):
+            # write vertex always
+            mesh.vertex_buffer.append(mesh.vertex_elements[0].float_values[i + f])
+        if len(mesh.vertex_elements[1].float_values) == num_floats:
+            # write normal
+            for f in range(0, 4, 1):
+                mesh.vertex_buffer.append(mesh.vertex_elements[1].float_values[i + f])
+        if len(mesh.vertex_elements[2].float_values) == num_floats \
+                and len(mesh.vertex_elements[3].float_values) == num_floats:
+            # texcoord 0 and 1 packed
+            for f in range(0, 2, 1):
+                mesh.vertex_buffer.append(mesh.vertex_elements[2].float_values[i + f])
+            for f in range(0, 2, 1):
+                mesh.vertex_buffer.append(mesh.vertex_elements[3].float_values[i + f])
+        elif len(mesh.vertex_elements[2].float_values) == num_floats:
+            for f in range(0, 4, 1):
+                # texcoord 0
+                mesh.vertex_buffer.append(mesh.vertex_elements[2].float_values[i + f])
+        if len(mesh.vertex_elements[4].float_values) == num_floats:
+            # write textangent
+            for f in range(0, 4, 1):
+                mesh.vertex_buffer.append(mesh.vertex_elements[4].float_values[i + f])
+        if len(mesh.vertex_elements[5].float_values) == num_floats:
+            # write texbinormal
+            for f in range(0, 4, 1):
+                mesh.vertex_buffer.append(mesh.vertex_elements[5].float_values[i + f])
+        if len(mesh.vertex_elements[6].float_values) == num_floats or elem_stride[6] > 0:
+            j = i * elem_stride[6]
+            # write blendindices
+            for f in range(0, 4, 1):
+                mesh.vertex_buffer.append(mesh.vertex_elements[6].float_values[j + f])
+        if len(mesh.vertex_elements[7].float_values) == num_floats or elem_stride[7] > 0:
+            j = i * elem_stride[7]
+            # write blendweights
+            for f in range(0, 4, 1):
+                mesh.vertex_buffer.append(mesh.vertex_elements[7].float_values[j + f])
 
 
 def parse_controller(controller_root, geom_name):
@@ -342,27 +479,43 @@ def parse_controller(controller_root, geom_name):
                 sc.vec4_weights.float_values = []
 
                 vpos = 0
+                warn = 0
                 for influences in sc.bones_per_vertex:
-                    indices = [0, 0, 0, 0, 0, 0, 0, 0]
-                    weights = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-                    strongest_index = 0
-                    strongest_weight = 0.0
-                    for i in range(0,int(influences),1):
+                    indices = []
+                    weights = []
+                    max_input_influence = 32
+                    for i in range(0, max_input_influence):
+                        indices.append(0)
+                        weights.append(0.0)
+                    if int(influences) > 4:
+                        warn += 1
+                    for i in range(0, int(influences), 1):
+                        if i >= 32:
+                            continue
                         indices[i] = sc.joint_weight_indices[vpos]
                         weight_index = sc.joint_weight_indices[vpos+1]
                         weights[i] = sc.weights[int(weight_index)]
-                        if float(strongest_weight) < float(weights[i]):
-                            strongest_weight = weights[i]
-                            strongest_index = indices[i]
                         vpos += 2
-                    for i in range(int(influences),4,1):
-                        indices[i] = strongest_index
-                        weights[i] = 0.0
-                    for i in range(0,4,1):
-                        # print( "index = " + str(indices[i]) + " wght = " + str(weights[i]))
-                        sc.vec4_indices.float_values.append(indices[i])
-                        sc.vec4_weights.float_values.append(weights[i])
-
+                    weight_index = []
+                    for i in range(max_input_influence):
+                        weight_index.append((float(weights[i]), float(indices[i])))
+                    weight_index.sort(reverse=True)
+                    total = 0.0
+                    for i in range(0, 4, 1):
+                        # print("index = " + str(indices[i]) + " wght = " + str(weights[i]))
+                        sc.vec4_indices.float_values.append(weight_index[i][1])
+                        sc.vec4_weights.float_values.append(weight_index[i][0])
+                        total += weight_index[i][0]
+                    norm_error = False
+                    if total < 0.9 and norm_error:
+                        print("warning: weights are not normalised")
+                        for i in range(0, 16, 1):
+                            if i == 5:
+                                print("discarded -------------")
+                            print(weight_index[i][0])
+                if warn > 0:
+                    print("warning: more than 4 bone influences found on " + str(warn) + " vertices")
+                    print("excess weights have been discarded and the remaining re-normalised")
                 return sc
             return None
     return None
@@ -390,7 +543,6 @@ def parse_geometry(node, lib_controllers):
                 geom_container.materials.append(tris.get("material"))
                 geom_container.meshes.append(parse_mesh(mesh, tris, geom_container.controller))
                 submesh = submesh + 1
-
             for tris in mesh.iter(schema + 'triangles'):
                 geom_container.materials.append(tris.get("material"))
                 geom_container.meshes.append(parse_mesh(mesh, tris, geom_container.controller))
@@ -405,8 +557,6 @@ def write_geometry_file(geom_instance):
     if num_meshes == 0:
         return
 
-    print("packing geometry: " + geom_instance.name)
-
     geometry_data = [struct.pack("i", (int(helpers.version_number))),
                      struct.pack("i", (int(num_meshes)))]
 
@@ -418,53 +568,72 @@ def write_geometry_file(geom_instance):
 
     data_size = len(geometry_data)*4
     for mesh in geom_instance.meshes:
-        # write collision info
         mesh_data = []
+
+        # calulate index size
+        num_floats = len(mesh.vertex_elements[0].float_values)
+        num_vertices = num_floats / 4
+        index_type = "i"
+        index_size = 4
+        if num_vertices < 65535:
+            index_type = "H"
+            index_size = 2
 
         # write min / max extents
         for i in range(0, 3, 1):
             mesh_data.append(struct.pack("f", (float(mesh.min_extents[i]))))
         for i in range(0, 3, 1):
             mesh_data.append(struct.pack("f", (float(mesh.max_extents[i]))))
-        # write vb and ib
-        mesh_data.append(struct.pack("i", (len(mesh.vertex_elements[0].float_values))))
-        mesh_data.append(struct.pack("i", (len(mesh.vertex_buffer))))
 
-        mesh_data.append(struct.pack("i", (len(mesh.index_buffer))))
-        mesh_data.append(struct.pack("i", (len(mesh.collision_vertices))))
+        # write info
+        mesh_data.append(struct.pack("i", int(0)))                      # handedness (left handed), for mesh opt
+        mesh_data.append(struct.pack("i", int(num_vertices)))           # num pos verts
+        mesh_data.append(struct.pack("i", int(index_size)))             # pos index size
+        mesh_data.append(struct.pack("i", (len(mesh.index_buffer))))    # pos buffer index count
+        mesh_data.append(struct.pack("i", int(num_vertices)))           # num vb verts
+        mesh_data.append(struct.pack("i", int(index_size)))             # vertex index size
+        mesh_data.append(struct.pack("i", (len(mesh.index_buffer))))    # vertex buffer index count
 
-        index_type = "i"
-        if len(mesh.index_buffer) < 65535:
-            index_type = "H"
-
+        # skinning is conditional, but write any fixed length data anyway
         skinned = 0
-        if geom_instance.controller != None:
+        num_joint_floats = 0
+        bind_shape_matrix = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 1.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0
+        ]
+        if geom_instance.controller:
             skinned = 1
-
+            num_joint_floats = len(geom_instance.controller.joint_bind_matrix)
+            bind_shape_matrix = geom_instance.controller.bind_shape_matrix
         mesh_data.append(struct.pack("i", int(skinned)))
+        mesh_data.append(struct.pack("i", int(num_joint_floats)))
+        helpers.pack_corrected_4x4matrix(mesh_data, bind_shape_matrix)
 
-        if skinned:
-            helpers.pack_corrected_4x4matrix(mesh_data, geom_instance.controller.bind_shape_matrix)
-            mesh_data.append(struct.pack("i", len(geom_instance.controller.joint_bind_matrix)))
+        # now write data
+        if num_joint_floats > 0:
             helpers.pack_corrected_4x4matrix(mesh_data, geom_instance.controller.joint_bind_matrix)
+        # position only buffer
         for vertexfloat in mesh.vertex_elements[0].float_values:
-            # position only buffer
             mesh_data.append(struct.pack("f", (float(vertexfloat))))
+        # vertex buffer
         for vertexfloat in mesh.vertex_buffer:
             mesh_data.append(struct.pack("f", (float(vertexfloat))))
-
         data_size += len(mesh_data)*4
 
+        # write index buffer twice, at this point they match, but after optimisation
+        # the number of indices in position only vs vertex buffer may changes
+
+        # position index buffer
         for index in mesh.index_buffer:
             mesh_data.append(struct.pack(index_type, (int(index))))
-
         data_size += len(mesh.index_buffer) * 2
-
-        for vertexfloat in mesh.collision_vertices:
-            mesh_data.append(struct.pack("f", (float(vertexfloat))))
-
-        data_size += len(mesh.collision_vertices) * 4
-
+        # vertex index buffer
+        for index in mesh.index_buffer:
+            mesh_data.append(struct.pack(index_type, (int(index))))
+        data_size += len(mesh.index_buffer) * 2
+        # top level pmm
         for m in mesh_data:
             geometry_data.append(m)
 

@@ -86,7 +86,7 @@
             technique          : gbuffer,
             scene              : main_scene,
             camera             : model_viewer_camera,
-            scene_views        : ["ces_render_scene"]
+            scene_views        : ["ecs_render_scene"]
         },
          
         deferred_lights_view:
@@ -102,7 +102,7 @@
             shader             : deferred_render,
             scene              : main_scene,
             camera             : model_viewer_camera,
-            scene_views        : ["ces_render_light_volumes"],
+            scene_views        : ["ecs_render_light_volumes"],
             
             sampler_bindings:
             [
@@ -113,21 +113,19 @@
             ],
         },
         
-        gbuffer_view_msaa:
+        gbuffer_view_msaa(gbuffer_view):
         {
-            inherit: gbuffer_view,
             target: [
                 gbuffer_albedo_msaa, 
                 gbuffer_normals_msaa, 
                 gbuffer_world_pos_msaa, 
                 gbuffer_depth_msaa
-            ]
+            ],
+            resolve: ["average_4x", "average_4x", "average_4x", "max_4x"]
         },
         
-        deferred_lights_view_msaa:
-        {
-            inherit: deferred_lights_view,
-            
+        deferred_lights_view_msaa(deferred_lights_view):
+        {            
             sampler_bindings:
             [
                 { texture: gbuffer_albedo_msaa, unit: 4, state: wrap_linear, bind_flags: [ps, msaa]},

@@ -95,6 +95,12 @@
                 0.5829348, -0.09794202,
                 0.3691838, 0.4140642
             ]
+        },
+        
+        unjitter:
+        {
+        	offsets: [],
+        	weights: []
         }
     },
     
@@ -236,7 +242,20 @@
             pmfx_shader        : post_process,
             technique          : crt,
             camera             : model_viewer_camera
-        }
+        },
+        
+        taa_resolve:
+        {
+            colour_write_mask  : 0xf,
+            clear_colour       : [0.0, 1.0, 0.0, 1.0],
+            clear_depth        : 1.0,
+            blend_state        : disabled,
+            viewport           : [0.0, 0.0, 1.0, 1.0],
+            raster_state       : post_process,
+            depth_stencil_state: disabled,
+            pmfx_shader        : post_process,
+            technique          : taa_resolve
+        },
     },
     
     post_processes:
@@ -451,7 +470,7 @@
                     { texture: pp_output_full, unit: 0, state: clamp_linear, shader: ps },
                 ]
             }
-        ]
+        ],
         
         blit_depth: [
             { 
@@ -461,6 +480,19 @@
                 sampler_bindings:
                 [
                     { texture: post_process_depth, unit: 0, state: clamp_linear, shader: ps },
+                ]
+            }
+        ],
+        
+        blit_taa_depth: [
+            { 
+                inherit         : blit_depth,
+                technique		: blit_depth_unjittered,
+                target          : [main_depth],
+                camera          : model_viewer_camera,
+                sampler_bindings:
+                [
+                    { texture: taa_depth, unit: 0, state: clamp_linear, shader: ps },
                 ]
             }
         ],
@@ -492,11 +524,12 @@
         
         menger_sponge: [
             {
-                inherit         : menger_sponge,
-                target          : [post_process_colour, post_process_depth],
+                inherit : menger_sponge,
+                target : [post_process_colour, post_process_depth],
                 pp_write_non_aux: true,
-                technique       : menger_sponge,
-                camera          : model_viewer_camera
+                technique : menger_sponge,
+                camera : model_viewer_camera,
+                resolve : ["average_4x", "max_4x"]
             },
         ],
         
@@ -543,6 +576,33 @@
                     { texture: post_process_depth, unit: 1, state: clamp_linear, shader: ps },
                 ]
             }
+        ],
+        
+        taa_resolve: [
+        	{
+        		inherit         : taa_resolve,
+                target          : [pp_output_full],
+                technique       : taa_resolve,
+                camera          : model_viewer_camera,
+                scene_views		: ["ecs_taa_resolve"],
+                
+                sampler_bindings:
+                [
+                    { texture: taa_colour, unit: 0, state: clamp_linear, shader: ps },
+                    { texture: taa_depth, unit: 1, state: clamp_point, shader: ps },
+                    { texture: taa_history, unit: 2, state: clamp_linear, shader: ps },
+                ]
+        	},
+        	{ 
+                inherit         : blit,
+                target          : [taa_history],
+                pp_write_non_aux: true,
+                camera          : model_viewer_camera,
+                sampler_bindings:
+                [
+                    { texture: pp_output_full, unit: 0, state: clamp_linear, shader: ps },
+                ]
+            }
         ]
     },
     
@@ -557,6 +617,11 @@
         editor_default: 
         { 
             chain: [ blit_depth, blit_post_process ]
+        },
+        
+        taa_resolve:
+        {
+        	chain : [ taa_resolve, blit_taa_depth, blit_post_process ]
         }
     }
 }

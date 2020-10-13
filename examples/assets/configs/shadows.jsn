@@ -1,8 +1,5 @@
-{
-    include: [
-        common.jsn
-    ],
-                
+import common.jsn
+{       
     views:
     {
         single_shadow_view:
@@ -18,7 +15,7 @@
             technique          : zonly,
             scene              : main_scene,
             camera             : shadow_camera,
-            scene_views        : ["ces_render_scene"],
+            scene_views        : ["ecs_render_scene"],
             render_flags       : ["forward_lit"]
         },
         
@@ -37,9 +34,8 @@
             scene_views        : ["shadows_debug"]
         },
         
-        shadow_demo_main:
+        shadow_demo_main(main_view):
         {
-            inherit        : "main_view",
             clear_colour   : [0.0, 0.0, 0.0, 1.0],
             clear_depth    : 1.0,
             

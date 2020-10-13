@@ -1,206 +1,224 @@
-#include "ecs/ecs_editor.h"
-#include "ecs/ecs_resources.h"
-#include "ecs/ecs_scene.h"
-#include "ecs/ecs_utilities.h"
-#include "volume_generator.h"
-
-#include "camera.h"
-#include "debug_render.h"
-#include "dev_ui.h"
-#include "loader.h"
-#include "pmfx.h"
-
-#include "file_system.h"
-#include "hash.h"
-#include "input.h"
-#include "pen.h"
-#include "pen_json.h"
-#include "pen_string.h"
-#include "renderer.h"
-#include "str_utilities.h"
-#include "timer.h"
-
-#include "forward_render.h"
+#include "../example_common.h"
+#include "shader_structs/forward_render.h"
 #include "maths/vec.h"
 
 using namespace put;
-using namespace put::ecs;
+using namespace ecs;
+using namespace forward_render;
 
-pen::window_creation_params pen_window{
-    1280,             // width
-    720,              // height
-    4,                // MSAA samples
-    "dynamic_cubemap" // window title / process name
-};
-
-namespace physics
+void* pen::user_entry(void* params);
+namespace pen
 {
-    extern PEN_TRV physics_thread_main(void* params);
-}
+    pen_creation_params pen_entry(int argc, char** argv)
+    {
+        pen::pen_creation_params p;
+        p.window_width = 1280;
+        p.window_height = 720;
+        p.window_title = "dynamic_cubemap";
+        p.window_sample_count = 4;
+        p.user_thread_function = user_setup;
+        p.flags = pen::e_pen_create_flags::renderer;
+        return p;
+    }
+} // namespace pen
 
 namespace
 {
     f32 zpos[] = {3.0f, -3.0f};
 
     s32 chorme_ball = 0;
-    s32 chrome2_ball = 0;
+    s32 glass_ball = 0;
+
+    put::camera chrome_camera;
+    put::camera chrome2_camera;
+    
+    u32 orbit_balls[4];
+
 } // namespace
 
-void setup_scene(ecs_scene* scene)
+void render_sky(const scene_view& view)
 {
+    pmfx::fullscreen_quad(view);
+}
+
+void example_setup(ecs_scene* scene, camera& cam)
+{
+    // sly renderer
+    put::scene_view_renderer svr_render_sky;
+    svr_render_sky.name = "ecs_render_sky";
+    svr_render_sky.id_name = PEN_HASH(svr_render_sky.name.c_str());
+    svr_render_sky.render_function = &render_sky;
+    pmfx::register_scene_view_renderer(svr_render_sky);
+    
+    // chrome cameras
+    put::camera_create_cubemap(&chrome_camera, 0.01f, 1000.0f);
+    chrome_camera.pos = vec3f(0.0f, 0.0f, 0.0f);
+
+    put::camera_create_cubemap(&chrome2_camera, 0.01f, 1000.0f);
+    chrome2_camera.pos = vec3f(0.0f, 0.0f, 0.0f);
+
+    pmfx::register_camera(&chrome_camera, "chrome_camera");
+    pmfx::register_camera(&chrome2_camera, "chrome2_camera");
+
+    pmfx::init("data/configs/dynamic_cubemap.jsn");
+    
+    u32 wrap_linear = pmfx::get_render_state(PEN_HASH("wrap_linear"), pmfx::e_render_state::sampler);
+
+    // setup scene
     clear_scene(scene);
+    
+    material_resource* simple_light_material = new material_resource;
+    simple_light_material->id_shader = PEN_HASH("forward_render");
+    simple_light_material->id_technique = PEN_HASH("simple_lighting");
+    simple_light_material->material_name = "simple_lighting";
+    simple_light_material->shader_name = "forward_render";
+    simple_light_material->hash = PEN_HASH("simple_lighting");
+    
+    static const u32 default_maps[] = {
+        put::load_texture("data/textures/defaults/albedo.dds"),
+        put::load_texture("data/textures/defaults/normal.dds"),
+        put::load_texture("data/textures/defaults/spec.dds"),
+        put::load_texture("data/textures/defaults/black.dds")};
 
-    material_resource* default_material = get_material_resource(PEN_HASH("default_material"));
+    for (s32 i = 0; i < 4; ++i)
+    {
+        simple_light_material->texture_handles[i] = default_maps[i];
+    }
+        
+    add_material_resource(simple_light_material);
 
+    material_resource* default_material = get_material_resource(PEN_HASH("simple_lighting"));
     geometry_resource* box = get_geometry_resource(PEN_HASH("cube"));
     geometry_resource* sphere = get_geometry_resource(PEN_HASH("sphere"));
+    geometry_resource* capsule = get_geometry_resource(PEN_HASH("capsule"));
 
     // front light
-    u32 light = get_new_node(scene);
+    u32 light = get_new_entity(scene);
     scene->names[light] = "front_light";
     scene->id_name[light] = PEN_HASH("front_light");
     scene->lights[light].colour = vec3f::one();
     scene->lights[light].direction = vec3f::one();
-    scene->lights[light].type = LIGHT_TYPE_DIR;
+    scene->lights[light].type = e_light_type::dir;
+    scene->lights[light].flags = e_light_flags::shadow_map;
     scene->transforms[light].translation = vec3f::zero();
     scene->transforms[light].rotation = quat();
     scene->transforms[light].scale = vec3f::one();
-    scene->entities[light] |= CMP_LIGHT;
-    scene->entities[light] |= CMP_TRANSFORM;
+    scene->entities[light] |= e_cmp::light;
+    scene->entities[light] |= e_cmp::transform;
 
     // back light
-    light = get_new_node(scene);
+    light = get_new_entity(scene);
     scene->names[light] = "back_light";
     scene->id_name[light] = PEN_HASH("back_light");
     scene->lights[light].colour = vec3f(0.6f, 0.6f, 0.6f);
     scene->lights[light].direction = -vec3f::one();
-    scene->lights[light].type = LIGHT_TYPE_DIR;
+    scene->lights[light].type = e_light_type::dir;
     scene->transforms[light].translation = vec3f::zero();
     scene->transforms[light].rotation = quat();
     scene->transforms[light].scale = vec3f::one();
-    scene->entities[light] |= CMP_LIGHT;
-    scene->entities[light] |= CMP_TRANSFORM;
+    scene->entities[light] |= e_cmp::light;
+    scene->entities[light] |= e_cmp::transform;
 
-    // ground
-    u32 ground = get_new_node(scene);
-    scene->names[ground] = "ground";
-    scene->transforms[ground].translation = vec3f(0.0f, -2.0f, 0.0f);
-    scene->transforms[ground].rotation = quat();
-    scene->transforms[ground].scale = vec3f(50.0f, 1.0f, 20.0f);
-    scene->entities[ground] |= CMP_TRANSFORM;
-    scene->parents[ground] = ground;
-    instantiate_geometry(box, scene, ground);
-    instantiate_material(default_material, scene, ground);
-    instantiate_model_cbuffer(scene, ground);
-    scene->physics_data[ground].rigid_body.shape = physics::BOX;
-    scene->physics_data[ground].rigid_body.mass = 0.0f;
-    instantiate_rigid_body(scene, ground);
-
-    scene->material_permutation[ground] |= FORWARD_LIT_UV_SCALE;
-
-    forward_lit_uv_scale* fluvs = (forward_lit_uv_scale*)&scene->material_data[ground].data;
-    fluvs->m_uv_scale = vec2f(0.125f) * 0.5f;
-
-    scene->samplers[ground].sb[0].handle = put::load_texture("data/textures/BlueChecker01.dds");
-    scene->samplers[ground].sb[0].sampler_unit = 0;
-    scene->samplers[ground].sb[0].sampler_state = pmfx::get_render_state(PEN_HASH("clamp_linear"), pmfx::RS_SAMPLER);
-    bake_material_handles(scene, ground);
-
-    f32 ramp1_angle[] = {M_PI * 0.125, M_PI * -0.125};
-    f32 ramp2_angle[] = {M_PI * -0.125, M_PI * 0.125};
-    f32 ramp1_x[] = {20.0f, -20.0f};
-    f32 ramp2_x[] = {-10.0f, 10.0f};
-    f32 block1_x[] = {30.0f, -30.0f};
-    f32 block2_x[] = {10.0f, -10.0f};
-
-    for (u32 i = 0; i < 2; ++i)
+    // ground tiles
+    vec3f start = vec3f(-9.0f * 7.0f * 0.5f, -4.0f, -9.0f * 7.0f * 0.5f);
+    vec3f pos = start;
+    for(u32 i = 0; i < 8; ++i)
     {
-        // ramp1
-        quat ramp_rot;
-        ramp_rot.euler_angles(ramp1_angle[i], 0.0f, 0.0f);
-        u32 ramp = get_new_node(scene);
-        scene->names[ramp] = "ramp";
-        scene->transforms[ramp].translation = vec3f(ramp1_x[i], 25.0f, zpos[i]);
-        scene->transforms[ramp].rotation = ramp_rot;
-        scene->transforms[ramp].scale = vec3f(20.0f, 1.0f, 2.0f);
-        scene->entities[ramp] |= CMP_TRANSFORM;
-        scene->parents[ramp] = ramp;
-        instantiate_geometry(box, scene, ramp);
-        instantiate_material(default_material, scene, ramp);
-        instantiate_model_cbuffer(scene, ramp);
-        scene->physics_data[ramp].rigid_body.shape = physics::BOX;
-        scene->physics_data[ramp].rigid_body.mass = 0.0f;
-        instantiate_rigid_body(scene, ramp);
+        pos.x = start.x;
+        
+        for(u32 i = 0; i < 8; ++i)
+        {
+            u32 ground = get_new_entity(scene);
+            scene->names[ground] = "ground";
+            scene->transforms[ground].translation = pos;
+            scene->transforms[ground].rotation = quat();
+            scene->transforms[ground].scale = vec3f(4.0f, ((rand()%255) / 255.0f) * 2.0f + 2.0f, 4.0f);
+            scene->entities[ground] |= e_cmp::transform;
+            scene->parents[ground] = ground;
+            
+            for(u32 i = 0; i < 4; ++i)
+            {
+                scene->samplers[ground].sb[i].sampler_unit = i;
+                scene->samplers[ground].sb[i].sampler_state = wrap_linear;
+            }
+            
+            instantiate_geometry(box, scene, ground);
+            instantiate_material(default_material, scene, ground);
+            instantiate_model_cbuffer(scene, ground);
+            
+            vec3f hsv = vec3f(lerp(0.1f, 0.4f, (f32)(pos.x+pos.y*8.0f)/(8.0f*8.0f*2.0f)) + 0.9f, 1.0f, 0.5f);
+                                
+            simple_lighting* m = (simple_lighting*)&scene->material_data[ground].data[0];
+            m->m_albedo = vec4f(maths::hsv_to_rgb(hsv), 1.0f);
+            m->m_roughness = 0.09f;
+            m->m_reflectivity = 0.3f;
 
-        // ramp2
-        ramp_rot.euler_angles(ramp2_angle[i], 0.0f, 0.0f);
-        ramp = get_new_node(scene);
-        scene->names[ramp] = "ramp";
-        scene->transforms[ramp].translation = vec3f(ramp2_x[i], 10.0f, zpos[i]);
-        scene->transforms[ramp].rotation = ramp_rot;
-        scene->transforms[ramp].scale = vec3f(20.0f, 1.0f, 2.0f);
-        scene->entities[ramp] |= CMP_TRANSFORM;
-        scene->parents[ramp] = ramp;
-        instantiate_geometry(box, scene, ramp);
-        instantiate_material(default_material, scene, ramp);
-        instantiate_model_cbuffer(scene, ramp);
-        scene->physics_data[ramp].rigid_body.shape = physics::BOX;
-        scene->physics_data[ramp].rigid_body.mass = 0.0f;
-        instantiate_rigid_body(scene, ramp);
-
-        // end block
-        u32 block = get_new_node(scene);
-        scene->names[block] = "block";
-        scene->transforms[block].translation = vec3f(block1_x[i], 1.0f, zpos[i]);
-        scene->transforms[block].rotation = quat();
-        scene->transforms[block].scale = vec3f(2.0f, 2.0f, 2.0f);
-        scene->entities[block] |= CMP_TRANSFORM;
-        scene->parents[block] = block;
-        instantiate_geometry(box, scene, block);
-        instantiate_material(default_material, scene, block);
-        instantiate_model_cbuffer(scene, block);
-        scene->physics_data[block].rigid_body.shape = physics::BOX;
-        scene->physics_data[block].rigid_body.mass = 0.0f;
-        instantiate_rigid_body(scene, block);
-
-        // back block
-        block = get_new_node(scene);
-        scene->names[block] = "block";
-        scene->transforms[block].translation = vec3f(block2_x[i], 0.0f, zpos[i]);
-        scene->transforms[block].rotation = quat();
-        scene->transforms[block].scale = vec3f(1.0f, 1.0f, 1.0f);
-        scene->entities[block] |= CMP_TRANSFORM;
-        scene->parents[block] = block;
-        instantiate_geometry(box, scene, block);
-        instantiate_material(default_material, scene, block);
-        instantiate_model_cbuffer(scene, block);
-        scene->physics_data[block].rigid_body.shape = physics::BOX;
-        scene->physics_data[block].rigid_body.mass = 0.0f;
-        instantiate_rigid_body(scene, block);
+            pos.x += 9.0f;
+        }
+        
+        pos.z += 9.0f;
     }
-
-    vec4f cols[] = {vec4f(1.0f, 0.1f, 0.1f, 1.0f), vec4f(0.1f, 1.0f, 0.3f, 1.0f), vec4f(0.2f, 0.1f, 1.0f, 1.0f),
-
-                    vec4f(1.0f, 0.2f, 1.0f, 1.0f), vec4f(0.2f, 1.0f, 1.0f, 1.0f), vec4f(1.0f, 0.6f, 0.1f, 1.0f),
-
-                    vec4f(0.5f, 0.1f, 1.0f, 1.0f), vec4f(0.5f, 1.0f, 0.2f, 1.0f)};
-
-    // assign colours
-    u32 col_index = 0;
-    for (u32 i = 3; i < 11; ++i)
+    
+    for(u32 i = 0; i < 4; ++i)
     {
-        forward_lit* fl = (forward_lit*)&scene->material_data[i].data;
-        fl->m_albedo = cols[col_index];
-        col_index++;
+        u32 orbit = get_new_entity(scene);
+        scene->names[orbit] = "orbit";
+        scene->transforms[orbit].translation = pos;
+        scene->transforms[orbit].rotation = quat();
+        scene->transforms[orbit].scale = vec3f(0.5f);
+        scene->entities[orbit] |= e_cmp::transform;
+        scene->parents[orbit] = orbit;
+        
+        for(u32 i = 0; i < 4; ++i)
+        {
+            scene->samplers[orbit].sb[i].sampler_unit = i;
+            scene->samplers[orbit].sb[i].sampler_state = wrap_linear;
+        }
+        
+        instantiate_geometry(sphere, scene, orbit);
+        instantiate_material(default_material, scene, orbit);
+        instantiate_model_cbuffer(scene, orbit);
+        
+        vec3f hsv = vec3f((f32)(rand()%RAND_MAX)/(f32)RAND_MAX, 1.0f, 1.0f);
+                            
+        simple_lighting* m = (simple_lighting*)&scene->material_data[orbit].data[0];
+        m->m_albedo = vec4f(maths::hsv_to_rgb(hsv), 1.0f);
+        m->m_roughness = 0.09f;
+        m->m_reflectivity = 0.3f;
+        
+        orbit_balls[i] = orbit;
     }
-
+    
+    u32 pillar = get_new_entity(scene);
+    scene->names[pillar] = "pillar";
+    scene->transforms[pillar].translation = vec3f(0.0f, 10.0f, 0.0f);
+    scene->transforms[pillar].rotation = quat();
+    scene->transforms[pillar].scale = vec3f(3.0f, 3.0f, 3.0f);
+    scene->entities[pillar] |= e_cmp::transform;
+    scene->parents[pillar] = pillar;
+    
+    for(u32 i = 0; i < 4; ++i)
+    {
+        scene->samplers[pillar].sb[i].sampler_unit = i;
+        scene->samplers[pillar].sb[i].sampler_state = wrap_linear;
+    }
+    
+    instantiate_geometry(capsule, scene, pillar);
+    instantiate_material(default_material, scene, pillar);
+    instantiate_model_cbuffer(scene, pillar);
+    
+    simple_lighting* m = (simple_lighting*)&scene->material_data[pillar].data[0];
+    m->m_albedo = vec4f(1.0f, 0.75f, 0.1f, 1.0f);
+    m->m_roughness = 0.09f;
+    m->m_reflectivity = 0.3f;
+    
     // chrome ball
-    chorme_ball = get_new_node(scene);
+    chorme_ball = get_new_entity(scene);
     scene->names[chorme_ball] = "chrome_ball";
     scene->transforms[chorme_ball].rotation = quat();
-    scene->transforms[chorme_ball].scale = vec3f(2.0f, 2.0f, 2.0f);
-    scene->transforms[chorme_ball].translation = vec3f(30.0f, 30.0f, zpos[0]);
-    scene->entities[chorme_ball] |= CMP_TRANSFORM;
+    scene->transforms[chorme_ball].scale = vec3f(5.0f, 5.0f, 5.0f);
+    scene->transforms[chorme_ball].translation = vec3f(10.0f, 5.0f, zpos[0]);
+    scene->entities[chorme_ball] |= e_cmp::transform;
     scene->parents[chorme_ball] = chorme_ball;
 
     instantiate_geometry(sphere, scene, chorme_ball);
@@ -213,212 +231,89 @@ void setup_scene(ecs_scene* scene)
     scene->material_resources[chorme_ball].id_technique = PEN_HASH("cubemap");
     scene->material_resources[chorme_ball].shader_name = "pmfx_utility";
     scene->material_resources[chorme_ball].id_shader = PEN_HASH("pmfx_utility");
-    scene->samplers[chorme_ball].sb[0].handle = chrome_cubemap_handle;
-    scene->samplers[chorme_ball].sb[0].sampler_unit = 3;
-    scene->samplers[chorme_ball].sb[0].sampler_state = pmfx::get_render_state(PEN_HASH("clamp_linear"), pmfx::RS_SAMPLER);
+
+    scene->state_flags[chorme_ball] &= ~e_state::samplers_initialised;
     bake_material_handles(scene, chorme_ball);
 
-    // add physics
-    scene->physics_data[chorme_ball].rigid_body.shape = physics::SPHERE;
-    scene->physics_data[chorme_ball].rigid_body.mass = 1.0f;
-    instantiate_rigid_body(scene, chorme_ball);
+    for (u32 s = 1; s < e_pmfx_constants::max_technique_sampler_bindings; ++s)
+        scene->samplers[chorme_ball].sb[s].handle = 0;
 
-    // chrome2 ball
-    chrome2_ball = get_new_node(scene);
-    scene->names[chrome2_ball] = "chrome2_ball";
-    scene->transforms[chrome2_ball].rotation = quat();
-    scene->transforms[chrome2_ball].scale = vec3f(2.0f, 2.0f, 2.0f);
-    scene->transforms[chrome2_ball].translation = vec3f(-30.0f, 30.0f, zpos[1]);
-    scene->entities[chrome2_ball] |= CMP_TRANSFORM;
-    scene->parents[chrome2_ball] = chrome2_ball;
+    scene->samplers[chorme_ball].sb[0].handle = chrome_cubemap_handle;
+    scene->samplers[chorme_ball].sb[0].sampler_unit = 3;
+    scene->samplers[chorme_ball].sb[0].sampler_state =
+        pmfx::get_render_state(PEN_HASH("clamp_linear"), pmfx::e_render_state::sampler);
 
-    instantiate_geometry(sphere, scene, chrome2_ball);
-    instantiate_model_cbuffer(scene, chrome2_ball);
-    instantiate_material(default_material, scene, chrome2_ball);
+    // glass ball
+    glass_ball = get_new_entity(scene);
+    scene->names[glass_ball] = "chrome2_ball";
+    scene->transforms[glass_ball].rotation = quat();
+    scene->transforms[glass_ball].scale = vec3f(5.0f, 5.0f, 5.0f);
+    scene->transforms[glass_ball].translation = vec3f(-10.0f, 5.0f, zpos[1]);
+    scene->entities[glass_ball] |= e_cmp::transform;
+    scene->parents[glass_ball] = glass_ball;
+
+    instantiate_geometry(sphere, scene, glass_ball);
+    instantiate_model_cbuffer(scene, glass_ball);
+    instantiate_material(default_material, scene, glass_ball);
 
     u32 chrome2_cubemap_handle = pmfx::get_render_target(PEN_HASH("chrome2"))->handle;
 
     // set material to cubemap
-    scene->material_resources[chrome2_ball].id_technique = PEN_HASH("cubemap");
-    scene->material_resources[chrome2_ball].shader_name = "pmfx_utility";
-    scene->material_resources[chrome2_ball].id_shader = PEN_HASH("pmfx_utility");
-    scene->samplers[chrome2_ball].sb[0].handle = chrome2_cubemap_handle;
-    scene->samplers[chrome2_ball].sb[0].sampler_unit = 3;
-    scene->samplers[chrome2_ball].sb[0].sampler_state = pmfx::get_render_state(PEN_HASH("clamp_linear"), pmfx::RS_SAMPLER);
-    bake_material_handles(scene, chrome2_ball);
+    scene->material_resources[glass_ball].id_technique = PEN_HASH("cubemap");
+    scene->material_resources[glass_ball].shader_name = "pmfx_utility";
+    scene->material_resources[glass_ball].id_shader = PEN_HASH("pmfx_utility");
+    scene->state_flags[glass_ball] &= ~e_state::samplers_initialised;
+    
+    bake_material_handles(scene, glass_ball);
 
-    // add physics
-    scene->physics_data[chrome2_ball].rigid_body.shape = physics::SPHERE;
-    scene->physics_data[chrome2_ball].rigid_body.mass = 1.0f;
-    instantiate_rigid_body(scene, chrome2_ball);
+    scene->samplers[glass_ball].sb[0].handle = chrome2_cubemap_handle;
+    scene->samplers[glass_ball].sb[0].sampler_unit = 3;
+    scene->samplers[glass_ball].sb[0].sampler_state =
+        pmfx::get_render_state(PEN_HASH("clamp_linear"), pmfx::e_render_state::sampler);
+
+    for (u32 s = 1; s < e_pmfx_constants::max_technique_sampler_bindings; ++s)
+        scene->samplers[glass_ball].sb[s].handle = 0;
 }
 
-void update_scane(ecs_scene* scene, camera* chrome_camera, camera* chrome2_camera)
+void example_update(ecs::ecs_scene* scene, camera& cam, f32 dt)
 {
-    chrome_camera->pos = scene->world_matrices[chorme_ball].get_translation();
-    chrome2_camera->pos = scene->world_matrices[chrome2_ball].get_translation();
-
-    // reset
-    static bool debounce = false;
-    if (pen::input_key(PK_R))
+    chrome_camera.pos = scene->world_matrices[chorme_ball].get_translation();
+    chrome2_camera.pos = scene->world_matrices[glass_ball].get_translation();
+    
+    static f32 acc = 0.0f;
+    acc += dt;
+    
+    f32 rx = sin(acc);
+    f32 ry = cos(acc);
+    scene->transforms[chorme_ball].translation = vec3f(rx, 0.0f, ry) * 15.0f + vec3f(0.0f, 8.0f + sin(acc*2.0f) * 3.0f, 0.0f);
+    scene->entities[chorme_ball] |= e_cmp::transform;
+    
+    rx = sin(acc+M_PI);
+    ry = cos(acc+M_PI);
+    scene->transforms[glass_ball].translation = vec3f(rx, 0.0f, ry) * 15.0f + vec3f(0.0f, 8.0f + cos(acc*2.0f) * 3.0f, 0.0f);
+    scene->entities[glass_ball] |= e_cmp::transform;
+    
+    for(u32 i = 0; i < 2; ++i)
     {
-        if (!debounce)
-        {
-            scene->transforms[chorme_ball].translation = vec3f(30.0f, 30.0f, zpos[0]);
-            scene->transforms[chrome2_ball].translation = vec3f(-30.0f, 30.0f, zpos[1]);
-
-            scene->entities[chorme_ball] |= CMP_TRANSFORM;
-            scene->entities[chrome2_ball] |= CMP_TRANSFORM;
-
-            debounce = true;
-        }
+        u32 b = orbit_balls[i];
+        
+        f32 rx = sin(acc+M_PI*i);
+        f32 ry = cos(acc+M_PI*i);
+        vec3f sp = scene->transforms[chorme_ball].translation;
+        
+        scene->transforms[b].translation = sp + vec3f(rx, ry, ry) * 6.0f;
+        scene->entities[b] |= e_cmp::transform;
     }
-    else
+    
+    for(u32 i = 0; i < 2; ++i)
     {
-        debounce = false;
+        u32 b = orbit_balls[i] + 2;
+        
+        f32 rx = sin(acc+M_PI*i);
+        f32 ry = cos(acc+M_PI*i);
+        vec3f sp = scene->transforms[glass_ball].translation;
+        
+        scene->transforms[b].translation = sp + vec3f(rx, ry, ry) * 6.0f;
+        scene->entities[b] |= e_cmp::transform;
     }
-}
-
-PEN_TRV pen::user_entry(void* params)
-{
-    // unpack the params passed to the thread and signal to the engine it ok to proceed
-    pen::job_thread_params* job_params = (pen::job_thread_params*)params;
-    pen::job*               p_thread_info = job_params->job_info;
-    pen::semaphore_post(p_thread_info->p_sem_continue, 1);
-
-    pen::jobs_create_job(physics::physics_thread_main, 1024 * 10, nullptr, pen::THREAD_START_DETACHED);
-
-    put::dev_ui::init();
-    put::dbg::init();
-
-    // create main camera and controller
-    put::camera main_camera;
-    put::camera_create_perspective(&main_camera, 60.0f, put::k_use_window_aspect, 0.1f, 1000.0f);
-
-    // dynamic cubemap cameras
-
-    // chrome
-    put::camera chrome_camera;
-    put::camera_create_cubemap(&chrome_camera, 0.01f, 1000.0f);
-    chrome_camera.pos = vec3f(0.0f, 0.0f, 0.0f);
-
-    put::camera chrome2_camera;
-    put::camera_create_cubemap(&chrome2_camera, 0.01f, 1000.0f);
-    chrome2_camera.pos = vec3f(0.0f, 0.0f, 0.0f);
-
-    put::scene_controller cmc;
-    cmc.camera = &chrome_camera;
-    cmc.update_function = nullptr;
-    cmc.name = "chrome_camera";
-    cmc.id_name = PEN_HASH(cmc.name.c_str());
-
-    put::scene_controller gmc;
-    gmc.camera = &chrome2_camera;
-    gmc.update_function = nullptr;
-    gmc.name = "chrome2_camera";
-    gmc.id_name = PEN_HASH(gmc.name.c_str());
-
-    put::scene_controller cc;
-    cc.camera = &main_camera;
-    cc.update_function = &ecs::update_model_viewer_camera;
-    cc.name = "model_viewer_camera";
-    cc.id_name = PEN_HASH(cc.name.c_str());
-
-    // create the main scene and controller
-    put::ecs::ecs_scene* main_scene;
-    main_scene = put::ecs::create_scene("main_scene");
-
-    put::scene_controller sc;
-    sc.scene = main_scene;
-    sc.update_function = &ecs::update_model_viewer_scene;
-    sc.name = "main_scene";
-    sc.camera = &main_camera;
-    sc.id_name = PEN_HASH(sc.name.c_str());
-
-    // create view renderers
-    put::scene_view_renderer svr_main;
-    svr_main.name = "ces_render_scene";
-    svr_main.id_name = PEN_HASH(svr_main.name.c_str());
-    svr_main.render_function = &ecs::render_scene_view;
-
-    put::scene_view_renderer svr_light_volumes;
-    svr_light_volumes.name = "ces_render_light_volumes";
-    svr_light_volumes.id_name = PEN_HASH(svr_light_volumes.name.c_str());
-    svr_light_volumes.render_function = &ecs::render_light_volumes;
-
-    put::scene_view_renderer svr_editor;
-    svr_editor.name = "ces_render_editor";
-    svr_editor.id_name = PEN_HASH(svr_editor.name.c_str());
-    svr_editor.render_function = &ecs::render_scene_editor;
-
-    pmfx::register_scene_view_renderer(svr_light_volumes);
-    pmfx::register_scene_view_renderer(svr_main);
-    pmfx::register_scene_view_renderer(svr_editor);
-
-    pmfx::register_scene_controller(sc);
-    pmfx::register_scene_controller(cc);
-
-    pmfx::register_scene_controller(cmc);
-    pmfx::register_scene_controller(gmc);
-
-    // volume rasteriser tool
-    put::ecs::editor_init(main_scene);
-
-    pmfx::init("data/configs/dynamic_cubemap.jsn");
-
-    f32 frame_time = 0.0f;
-
-    setup_scene(main_scene);
-
-    while (1)
-    {
-        static u32 frame_timer = pen::timer_create("frame_timer");
-        pen::timer_start(frame_timer);
-
-        put::dev_ui::new_frame();
-
-        update_scane(main_scene, &chrome_camera, &chrome2_camera);
-
-        pmfx::update();
-
-        pmfx::render();
-
-        pmfx::show_dev_ui();
-
-        put::vgt::show_dev_ui();
-
-        put::dev_ui::render();
-
-        frame_time = pen::timer_elapsed_ms(frame_timer);
-
-        pen::renderer_present();
-
-        // for unit test
-        pen::renderer_test_run();
-
-        pen::renderer_consume_cmd_buffer();
-
-        put::vgt::post_update();
-        pmfx::poll_for_changes();
-        put::poll_hot_loader();
-
-        // msg from the engine we want to terminate
-        if (pen::semaphore_try_wait(p_thread_info->p_sem_exit))
-            break;
-    }
-
-    ecs::destroy_scene(main_scene);
-    ecs::editor_shutdown();
-
-    // clean up mem here
-    put::pmfx::shutdown();
-    put::dbg::shutdown();
-    put::dev_ui::shutdown();
-
-    pen::renderer_consume_cmd_buffer();
-
-    // signal to the engine the thread has finished
-    pen::semaphore_post(p_thread_info->p_sem_terminated, 1);
-
-    return PEN_THREAD_OK;
 }

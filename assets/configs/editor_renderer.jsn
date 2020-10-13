@@ -1,10 +1,7 @@
-{
-    include: [
-        common.jsn,
-        deferred_renderer.jsn,
-        post_process.jsn
-    ],
-    
+import common.jsn
+import deferred_renderer.jsn
+import post_process.jsn
+{	    
     render_targets:
     {
         picking:
@@ -20,6 +17,7 @@
             format: d24s8,
         },
 
+
         volume_raster:
         {
             size    : [128,128],
@@ -31,11 +29,52 @@
         {
             size  : [128,128],
             format: d24s8,
+        },
+        
+        volume_gi:
+        {
+			size : [256, 256, 256],
+            format : rgba8,
+            gpu_write : true,
+			mips : true
         }
     },
         
     views:
-    {                
+    {
+    	editor_main(main_view):
+    	{
+    		raster_state : default,
+    		clear_colour : [0.0, 0.0, 0.0, 1.0]
+    	},
+    	
+		editor_main_basic(main_view):
+    	{
+    		raster_state : default,
+    		clear_colour : [0.0, 0.0, 0.0, 1.0],
+			pmfx_shader  : forward_render,
+            technique    : simple_lighting,
+	
+			sampler_bindings:
+            [
+                { texture: single_shadow_map, unit: 7, state: shadow_compare, shader: ps }
+            ]
+    	},
+		
+		editor_main_gi(main_view_temporal_aa):
+    	{
+    		raster_state : default,
+    		clear_colour : [0.0, 0.0, 0.0, 1.0],
+			
+			sampler_bindings:
+            [
+                { texture: shadow_map, unit: 15, state: shadow_compare, shader: ps },
+                { texture: area_light_textures, unit: 11, state: clamp_linear, shader: ps },
+                { texture: omni_shadow_map, unit: 10, state: clamp_linear, shader: ps },
+				{ texture: volume_gi, unit: 9, state: clamp_linear, shader: ps },
+            ],
+    	},
+	    	                
         editor_view:
         {
             target             : [main_colour, main_depth],
@@ -48,7 +87,7 @@
             technique          : constant_colour,
             scene              : main_scene,
             camera             : model_viewer_camera,
-            scene_views        : ["ces_render_editor"]
+            scene_views        : ["ecs_render_editor"]
         },
         
         picking_view:
@@ -58,7 +97,7 @@
             {
                 picking:
                 {
-                    clear_colour_u:[10000, 10000, 10000, 10000]
+                    clear_colour_u:[-1, -1, -1, -1]
                 }
             },
             clear_depth        : 1.0,
@@ -70,7 +109,7 @@
             technique          : picking,
             scene              : main_scene,
             camera             : model_viewer_camera,
-            scene_views        : ["ces_render_scene"]
+            scene_views        : ["ecs_render_scene"]
         },
                         
         volume_rasteriser:
@@ -87,30 +126,60 @@
             camera             : volume_rasteriser_camera,
             pmfx_shader        : pmfx_utility,
             technique          : volume_raster_albedo,
-            scene_views        : ["ces_render_scene"],
+            scene_views        : ["ecs_render_scene"],
             render_flags       : ["forward_lit"],
             
             sampler_bindings:
             [
                 { texture: shadow_map, unit: 15, state: wrap_linear, shader: ps },
             ],
+        },
+        
+        volume_gi_compute:
+        {
+        	type: "compute",
+        	target: [volume_gi],
+        	clear_colour: [0.0, 0.0, 0.0, 0.0],
+			pmfx_shader : "compute",
+            technique : "volume_gi",
+            scene: main_scene,
+            scene_views : ["ecs_compute_volume_gi"],
+			generate_mip_maps : true,
         }
     },
     
     view_sets: 
-    {
+    {        
         editor: [
-            main_view,
-            editor_view, 
-            picking_view, 
             multiple_shadow_views,
-            volume_rasteriser
+            multiple_area_light_views,
+            multiple_omni_shadow_views,
+            picking_view,
+            editor_main,
+            editor_view
+        ],
+        
+        editor_basic: [
+        	single_shadow_view,
+			editor_main_basic,
+            editor_view
+        ],
+        
+        editor_gi: [
+        	multiple_shadow_views,
+			multiple_colour_shadow_views,
+            multiple_area_light_views,
+            multiple_omni_shadow_views,
+            volume_gi_compute,
+			picking_view,
+			editor_main_gi,
+            editor_view
         ],
         
         editor_post_processed: [
+            picking_view,
             main_view_post_processed,
-            editor_view, 
-            picking_view, 
+            editor_view,  
             volume_rasteriser
         ],
     },

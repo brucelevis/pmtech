@@ -14,6 +14,13 @@ struct vs_output
     float4 texcoord : TEXCOORD4;
 };
 
+struct vs_output_debug
+{
+    float4 position : SV_POSITION;
+    float4 debug1 : TEXCOORD0;
+    float4 debug2 : TEXCOORD1;
+};
+
 struct vs_output_picking
 {
     float4 position : SV_POSITION;
@@ -69,14 +76,13 @@ declare_texture_samplers
     texture_2d( diffuse_texture, 0 );
     texture_2d( normal_texture, 1 );
     texture_2d( specular_texture, 2 );
-    
     texture_cube( cubemap_texture, 3 );
     texture_3d( volume_texture, 4 );
-    
     texture_3d( sdf_volume, 14 );
+    texture_2d_array( area_light_textures, 11 );
 };
 
-vs_output vs_main_skinned( vs_input_skinned input )
+vs_output vs_main_skinned( vs_input input )
 {
     vs_output output;
     
@@ -94,6 +100,18 @@ vs_output vs_main_skinned( vs_input_skinned input )
     output.texcoord = float4( input.texcoord.x, 1.0f - input.texcoord.y, input.texcoord.z, 1.0f - input.texcoord.w );
     
     output.texcoord = input.blend_weights;
+    
+    return output;
+}
+
+vs_output_debug vs_main_skinned_debug( vs_input input )
+{
+    vs_output_debug output;
+
+    output.position = mul( input.position, vp_matrix );
+    
+    output.debug1 = input.blend_weights;
+    output.debug2 = input.blend_indices;
     
     return output;
 }
@@ -287,12 +305,12 @@ ps_output ps_cubemapped( vs_output input )
 {
     ps_output output;
     
-    float3 rd = normalize(input.world_pos.xyz - camera_view_pos.xyz);
+    // cubemap space z is inverted, so we must invert z of the ray and also the z of the normal
+    float3 rd = normalize(input.world_pos.xyz - camera_view_pos.xyz) * float3(1.0, 1.0, -1.0);
+    float3 n = normalize(input.normal.xyz * float3(1.0, 1.0, -1.0));
+    float3 r = reflect(rd, n);
     
-    float3 r = reflect(rd, normalize(input.normal.xyz));
-    
-    output.colour = sample_texture(cubemap_texture, r);
-    
+    output.colour = sample_texture( cubemap_texture, r);    
     return output;
 }
 
@@ -300,10 +318,9 @@ ps_output ps_glass( vs_output input )
 {
     ps_output output;
     
-    float3 rd = normalize(input.world_pos.xyz - camera_view_pos.xyz);
-
-    float3 n = normalize(input.normal.xyz);
-    float3 r = refract(rd, n, 0.0);
+    float3 rd = normalize(input.world_pos.xyz - camera_view_pos.xyz) * float3(1.0, 1.0, -1.0);
+    float3 n = normalize(input.normal.xyz) * float3(1.0, 1.0, -1.0);
+    float3 r = refract(rd, n, 1.458);
     
     output.colour = sample_texture(cubemap_texture, rd);
     
@@ -315,6 +332,21 @@ ps_output ps_constant_colour( vs_output input )
     ps_output output;
     output.colour = float4( user_data2.rgb, 1.0 );
         
+    return output;    
+}
+
+ps_output ps_area_light_texture( vs_output input ) 
+{
+    ps_output output;
+    output.colour = sample_texture_array_level( area_light_textures, input.texcoord.xy, user_data.z, 0.0);
+        
+    return output;    
+}
+
+ps_output ps_area_light_colour( vs_output input ) 
+{
+    ps_output output;
+    output.colour = area_lights[int(user_data.z)].colour;
     return output;    
 }
 
@@ -345,7 +377,7 @@ ps_output ps_volume_texture( vs_output input )
     float3 vddx = ddx( uvw );
     float3 vddy = ddy( uvw );
     
-    for( int s = 0; s < int(max_samples); ++s )
+    for(int s = 0; s < int(max_samples); ++s )
     {        
         output.colour = sample_texture_grad( volume_texture, uvw, vddx, vddy );
         
@@ -364,7 +396,7 @@ ps_output ps_volume_texture( vs_output input )
         if(uvw.z > 1.0 || uvw.z < 0.0)
             discard;
         
-        if( s == max_samples-1)
+        if(s == int(max_samples)-1)
             discard;
     }
     
@@ -543,8 +575,38 @@ ps_output ps_area_box_light( vs_output input )
     return output;
 }
 
+ps_output ps_skinning_debug( vs_output_debug input )
+{
+    ps_output output;
+    
+    if:(WEIGHTS)
+    {
+        output.colour = input.debug1;
+    }
+    else:
+    {
+        output.colour = input.debug2 / m_index_range;
+    }
+    
+    return output;
+}
+
+ps_output ps_fixed_light( vs_output input )
+{
+    ps_output output;
+    float dp = max(dot(input.normal.xyz, normalize(float3(-1.0, -1.0, 1.0))), 0.5);
+    output.colour = float4(dp, dp, dp, 1.0);
+    return output;
+}
+
 pmfx:
 {    
+    "fixed_light":
+    {
+        "vs": "vs_main",
+        "ps": "ps_fixed_light"
+    },
+    
     "constant_colour":
     {
         "vs": "vs_main",
@@ -587,6 +649,26 @@ pmfx:
         "ps": "ps_texcoord_1"
     },
     
+    "skinning_debug":
+    {
+        "vs": "vs_main_skinned_debug",
+        "ps": "ps_skinning_debug",
+        
+        "defines": ["SKINNED"],
+        
+        "constants":
+        {
+            "index_range": { 
+                "type": "float", "widget": "slider", "min": 0, "max": 1000, "default": 1.0 
+            }
+        },
+        
+        "permutations":
+        {
+            "WEIGHTS": [1, [0,1]]
+        }
+    },
+    
     "cubemap":
     {
         "vs": "vs_main",
@@ -622,13 +704,7 @@ pmfx:
         "vs": "vs_main_volume_texture",
         "ps": "ps_shadow_sdf"
     },
-    
-    "area_box_light":
-    {
-        "vs": "vs_main_volume_texture",
-        "ps": "ps_area_box_light"
-    },
-    
+
     "picking":
     {
         "vs": "vs_picking",
@@ -645,6 +721,18 @@ pmfx:
     {
         "vs": "vs_main",
         "ps": "ps_diffuse"
+    },
+    
+    "area_light_texture":
+    {
+        "vs": "vs_main",
+        "ps": "ps_area_light_texture"
+    },
+    
+    "area_light_colour":
+    {
+        "vs": "vs_main",
+        "ps": "ps_area_light_colour"
     }
 }
 

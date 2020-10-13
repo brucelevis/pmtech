@@ -1,25 +1,11 @@
+local s_project_name
+
 local function add_pmtech_links()
 	configuration "Debug"
 		links { "put", "pen" }
 
 	configuration "Release"
 		links {  "put", "pen" }
-	
-	configuration {}
-end
-
-local function copy_shared_libs()
-	configuration "Debug"
-		postbuildcommands 
-		{
-			("{COPY} " .. shared_libs_dir .. " %{cfg.targetdir}")
-		}
-		
-	configuration "Release"
-		postbuildcommands 
-		{
-			("{COPY} " .. shared_libs_dir .. " %{cfg.targetdir}")
-		}
 	
 	configuration {}
 end
@@ -31,24 +17,25 @@ local function setup_osx()
 		"GameController.framework",
 		"iconv",
 		"fmod",
-		"IOKit.framework"
+		"IOKit.framework",
+		"MetalKit.framework",
+		"Metal.framework",
+		"OpenGL.framework"
 	}
-	
-	if renderer_dir == "metal" then
-		links 
-		{ 
-			"MetalKit.framework",
-			"Metal.framework"
-		}
-	elseif renderer_dir == "opengl" then
-		links 
-		{ 
-			"OpenGL.framework"
-		}
-	end
-	
 	add_pmtech_links()
-	copy_shared_libs()
+	
+	if _ACTION == "xcode4" then
+	install_name_tool = "cd ../../bin/osx && install_name_tool -add_rpath @executable_path/../../.. "
+	configuration "Debug"
+		postbuildcommands {
+			install_name_tool .. s_project_name .. "_d.app/Contents/MacOS/" .. s_project_name .. "_d"
+		}
+	configuration "Release"
+		postbuildcommands {
+			install_name_tool .. s_project_name .. ".app/Contents/MacOS/" .. s_project_name
+		}
+	configuration {}
+	end
 end
 
 local function setup_linux()
@@ -61,41 +48,73 @@ local function setup_linux()
 		"GLU",
 		"GL",
 		"X11",
-		"fmod"
+		"fmod",
+		"dl"
 	}
 end
 
 local function setup_win32()
-	links 
-	{ 
-		"d3d11.lib", 
-		"dxguid.lib", 
-		"winmm.lib", 
-		"comctl32.lib", 
-		"fmod64_vc.lib",
-		"Shlwapi.lib"	
-	}
+    if renderer_dir == "vulkan" then
+        libdirs
+        {
+            "$(VK_SDK_PATH)/Lib"
+        }
+        links
+        {
+            "vulkan-1.lib"
+        }
+    elseif renderer_dir == "opengl" then
+        includedirs
+        {
+            pmtech_dir .. "/third_party/glew/include"
+        }
+        libdirs
+        {
+            pmtech_dir .. "/third_party/glew/lib/win64"
+        }
+		links 
+        { 
+            "OpenGL32.lib"
+        }
+    else
+    	links 
+        { 
+            "d3d11.lib"
+        }
+    end
+    
+    links
+    {
+        "dxguid.lib",
+        "winmm.lib", 
+        "comctl32.lib", 
+        "fmod64_vc.lib",
+        "Shlwapi.lib"	
+    }
+
 	add_pmtech_links()
 	
 	systemversion(windows_sdk_version())
 	disablewarnings { "4800", "4305", "4018", "4244", "4267", "4996" }
-
-	copy_shared_libs()
 end
 
 local function setup_ios()
 	links 
 	{ 
-		"OpenGLES.framework",
 		"Foundation.framework",
 		"UIKit.framework",
-		"GLKit.framework",
 		"QuartzCore.framework",
+		"MetalKit.framework",
+		"Metal.framework",
+		"AVFoundation.framework",
+		"AudioToolbox.framework",
+		"MediaPlayer.framework",
+		"fmod_iphoneos"
 	}
-	
+		
 	files 
 	{ 
-		(pmtech_dir .. "/template/ios/**.*"),
+		(pmtech_dir .. "/core/template/ios/**.*"),
 		"bin/ios/data"
 	}
 
@@ -113,14 +132,43 @@ end
 local function setup_android()
 	files
 	{
-		pmtech_dir .. "/template/android/manifest/**.*",
-		pmtech_dir .. "/template/android/activity/**.*"
+		pmtech_dir .. "/core/template/android/manifest/**.*",
+		pmtech_dir .. "/core/template/android/activity/**.*"
 	}
 	
 	androidabis
 	{
 		"armeabi-v7a", "x86"
 	}
+end
+
+local function setup_web()
+	file = io.open(("assets/file_lists/" .. s_project_name .. "_data.txt"), "r")
+	if file then
+		io.input(file)
+		file_list = io.read()
+		linkoptions { file_list }
+		io.close(file)
+	end
+	
+	configuration "Debug"
+		buildoptions { 
+			"-g4", 
+			"-s STACK_OVERFLOW_CHECK=1", 
+			"-s SAFE_HEAP=1", 
+			"-s DETERMINISTIC=1" 
+		}
+		linkoptions { 
+			"-g4", 
+			"--source-map-base http://localhost:8000/web/",
+			"-s STACK_OVERFLOW_CHECK=1", 
+			"-s SAFE_HEAP=1", 
+			"-s DETERMINISTIC=1" 
+		}
+	
+	configuration {}
+	targetextension (".html")
+	links { "pen", "put" }
 end
 
 local function setup_platform()
@@ -134,39 +182,31 @@ local function setup_platform()
 		setup_linux()
 	elseif platform_dir == "android" then 
 		setup_android()
+	elseif platform_dir == "web" then
+		setup_web()
 	end
 end
 
 local function setup_bullet()
-	bullet_lib = "bullet_monolithic"
-	bullet_lib_debug = "bullet_monolithic_d"
-	bullet_lib_dir = "osx"
-
-	if platform_dir == "linux" then
-		bullet_lib_dir = "linux"
-	end
-
-	if _ACTION == "vs2017" or _ACTION == "vs2015" then
-		bullet_lib_dir = _ACTION
-		bullet_lib = (bullet_lib)
-		bullet_lib_debug = (bullet_lib_debug)
-	end
-	
 	libdirs
 	{
-		(pmtech_dir .. "third_party/bullet/lib/" .. bullet_lib_dir)
+		(pmtech_dir .. "third_party/bullet/lib/" .. platform_dir)
 	}
 	
 	configuration "Debug"
-		links { bullet_lib_debug }
+		links { "bullet_monolithic_d" }
 	
 	configuration "Release"
-		links { bullet_lib }
+		links { "bullet_monolithic" }
 	
 	configuration {}
 end
 
 local function setup_fmod()
+	if platform == "web" then
+		return
+	end
+
 	libdirs
 	{
 		(pmtech_dir .. "third_party/fmod/lib/" .. platform_dir)
@@ -178,29 +218,34 @@ function setup_modules()
 	setup_fmod()
 end
 
-function create_app(project_name, source_directory, root_directory)
+function create_binary(project_name, source_directory, root_directory, binary_type)
+	s_project_name = project_name
 	project ( project_name )
-		kind "WindowedApp"
+		setup_product( project_name )
+		kind ( binary_type )
 		language "C++"
-		dependson{ "pen", "put" }
 		
+		if binary_type ~= "SharedLib" then
+			dependson { "pen", "put" }
+		end
+	
 		includedirs
 		{
-			-- core
-			pmtech_dir .. "source/pen/include",
-			pmtech_dir .. "source/pen/include/common", 
-			pmtech_dir .. "source/pen/include/" .. platform_dir,
-			pmtech_dir .. "source/pen/include/" .. renderer_dir,
-			
+			-- platform
+			pmtech_dir .. "core/pen/include",
+			pmtech_dir .. "core/pen/include/common", 
+			pmtech_dir .. "core/pen/include/" .. platform_dir,
+		
 			--utility			
-			pmtech_dir .. "source/put/source/",
-			
+			pmtech_dir .. "core/put/source/",
+		
 			-- third party			
 			pmtech_dir .. "third_party/",
-		
+	
+			-- local
 			"include/",
 		}
-		
+	
 		files 
 		{ 
 			(root_directory .. "code/" .. source_directory .. "/**.cpp"),
@@ -209,38 +254,41 @@ function create_app(project_name, source_directory, root_directory)
 			(root_directory .. "code/" .. source_directory .. "/**.m"),
 			(root_directory .. "code/" .. source_directory .. "/**.mm")
 		}
-		
+	
 		setup_env()
 		setup_platform()
+		setup_platform_defines()
 		setup_modules()
-	
+
 		location (root_directory .. "/build/" .. platform_dir)
 		targetdir (root_directory .. "/bin/" .. platform_dir)
 		debugdir (root_directory .. "/bin/" .. platform_dir)
-						
+					
 		configuration "Release"
 			defines { "NDEBUG" }
-			flags { "WinMain", "OptimizeSpeed" }
+			entrypoint "WinMainCRTStartup"
+			optimize "Speed"
 			targetname (project_name)
-			architecture "x64"
 			libdirs
 			{ 
-				pmtech_dir .. "source/pen/lib/" .. platform_dir .. "/release", 
-				pmtech_dir .. "source/put/lib/" .. platform_dir .. "/release",
+				pmtech_dir .. "core/pen/lib/" .. platform_dir .. "/release", 
+				pmtech_dir .. "core/put/lib/" .. platform_dir .. "/release",
 			}
-		
+	
 		configuration "Debug"
 			defines { "DEBUG" }
-			flags { "WinMain" }
+			entrypoint "WinMainCRTStartup"
 			symbols "On"
 			targetname (project_name .. "_d")
-			architecture "x64"
 			libdirs
 			{ 
-				pmtech_dir .. "source/pen/lib/" .. platform_dir .. "/debug", 
-				pmtech_dir .. "source/put/lib/" .. platform_dir .. "/debug",
+				pmtech_dir .. "core/pen/lib/" .. platform_dir .. "/debug", 
+				pmtech_dir .. "core/put/lib/" .. platform_dir .. "/debug",
 			}
-		
+end
+
+function create_app(project_name, source_directory, root_directory)
+	create_binary(project_name, source_directory, root_directory, "WindowedApp")
 end
 
 function create_app_example( project_name, root_directory )

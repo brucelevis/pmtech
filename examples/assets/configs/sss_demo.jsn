@@ -1,39 +1,35 @@
-{
-    include: [
-        common.jsn,
-        post_process.jsn,
-        editor_renderer.jsn
-    ],
-                
+import common.jsn
+import editor_renderer.jsn
+import post_process.jsn
+{         
     views:
     {
         single_shadow_view:
         {
-            target             : [shadow_map],
+            target             : [single_shadow_map],
             clear_depth        : 1.0,
             colour_write_mask  : 0xf,
             blend_state        : disabled,
             viewport           : [0.0, 0.0, 1.0, 1.0],
-            raster_state       : default,
+            raster_state       : post_process,
             depth_stencil_state: default,
             pmfx_shader        : forward_render,
             technique          : zonly,
             scene              : main_scene,
-            camera             : shadow_camera,
-            scene_views        : ["ces_render_scene"],
-            render_flags       : ["forward_lit"]
+            scene_views        : ["ecs_render_shadow_maps"],
+            render_flags       : ["shadow_map"]
         },
         
-        sss_main:
+        sss_main(main_view_post_processed):
         {
-            inherit        : "main_view_post_processed",
             clear_colour   : [0.0, 0.0, 0.0, 1.0],
             clear_depth    : 1.0,
             post_process   : pp_sss,
             
             sampler_bindings:
             [
-                { texture: shadow_map, unit: 15, state: wrap_linear, shader: ps },
+			    { texture: single_shadow_map, unit: 8, state: clamp_linear, shader: ps },
+                { texture: single_shadow_map, unit: 7, state: shadow_compare, shader: ps }
             ],
         }
     },

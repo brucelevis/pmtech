@@ -1,17 +1,32 @@
 #include "../example_common.h"
+#include "shader_structs/forward_render.h"
 
 using namespace put;
 using namespace ecs;
+using namespace forward_render;
 
-pen::window_creation_params pen_window{
-    1280,                   // width
-    720,                    // height
-    4,                      // MSAA samples
-    "rigid_body_primitives" // window title / process name
-};
-
-void example_setup(ecs::ecs_scene* scene)
+namespace pen
 {
+    pen_creation_params pen_entry(int argc, char** argv)
+    {
+        pen::pen_creation_params p;
+        p.window_width = 1280;
+        p.window_height = 720;
+        p.window_title = "rigid_body_primitives";
+        p.window_sample_count = 4;
+        p.user_thread_function = user_setup;
+        p.flags = pen::e_pen_create_flags::renderer;
+        return p;
+    }
+} // namespace pen
+
+void example_setup(ecs_scene* scene, camera& cam)
+{
+    pmfx::set_view_set("editor_basic");
+    
+    scene->view_flags &= ~e_scene_view_flags::hide_debug;
+    editor_set_transform_mode(e_transform_mode::physics);
+
     clear_scene(scene);
 
     material_resource* default_material = get_material_resource(PEN_HASH("default_material"));
@@ -21,35 +36,71 @@ void example_setup(ecs::ecs_scene* scene)
     geometry_resource* capsule = get_geometry_resource(PEN_HASH("capsule"));
     geometry_resource* sphere = get_geometry_resource(PEN_HASH("sphere"));
     geometry_resource* cone = get_geometry_resource(PEN_HASH("physics_cone"));
+    
+    scene->shadow_extent_constraints.min = vec3f(-50.0f, 0.0f, -50.0f);
+    scene->shadow_extent_constraints.max = vec3f( 50.0f, 50.0f,  50.0f);
 
     // add light
-    u32 light = get_new_node(scene);
+    u32 light = get_new_entity(scene);
     scene->names[light] = "front_light";
     scene->id_name[light] = PEN_HASH("front_light");
     scene->lights[light].colour = vec3f::one();
     scene->lights[light].direction = vec3f::one();
-    scene->lights[light].type = LIGHT_TYPE_DIR;
+    scene->lights[light].type = e_light_type::dir;
+    scene->lights[light].flags = e_light_flags::shadow_map;
     scene->transforms[light].translation = vec3f::zero();
     scene->transforms[light].rotation = quat();
     scene->transforms[light].scale = vec3f::one();
-    scene->entities[light] |= CMP_LIGHT;
-    scene->entities[light] |= CMP_TRANSFORM;
+    scene->entities[light] |= e_cmp::light;
+    scene->entities[light] |= e_cmp::transform;
 
     // ground
-    u32 ground = get_new_node(scene);
+    u32 ground = get_new_entity(scene);
     scene->names[ground] = "ground";
     scene->transforms[ground].translation = vec3f::zero();
     scene->transforms[ground].rotation = quat();
     scene->transforms[ground].scale = vec3f(50.0f, 1.0f, 50.0f);
-    scene->entities[ground] |= CMP_TRANSFORM;
+    scene->entities[ground] |= e_cmp::transform;
     scene->parents[ground] = ground;
     instantiate_geometry(box, scene, ground);
     instantiate_material(default_material, scene, ground);
     instantiate_model_cbuffer(scene, ground);
 
-    scene->physics_data[ground].rigid_body.shape = physics::BOX;
+    scene->physics_data[ground].rigid_body.shape = physics::e_shape::box;
     scene->physics_data[ground].rigid_body.mass = 0.0f;
     instantiate_rigid_body(scene, ground);
+    
+    vec3f wall_pos[] = {
+        vec3f(-51.0f, 2.0f, 0.0f),
+        vec3f( 51.0f, 2.0f, 0.0f),
+        vec3f( 0.0f, 2.0f, -51.0f),
+        vec3f( 0.0f, 2.0f, 51.0f)
+    };
+    
+    vec3f wall_size[] = {
+        vec3f(1.0f, 2.0f, 50.0f),
+        vec3f(1.0f, 2.0f, 50.0f),
+        vec3f(52.0f, 2.0f, 1.0f),
+        vec3f(52.0f, 2.0f, 1.0f)
+    };
+    
+    // walls to stop falling bodies
+    for(u32 i = 0; i < 4; ++i)
+    {
+        u32 wall = get_new_entity(scene);
+        scene->names[wall] = "wall";
+        scene->transforms[wall].translation = wall_pos[i];
+        scene->transforms[wall].rotation = quat();
+        scene->transforms[wall].scale = wall_size[i];
+        scene->entities[wall] |= e_cmp::transform;
+        scene->parents[wall] = wall;
+        scene->physics_data[wall].rigid_body.shape = physics::e_shape::box;
+        scene->physics_data[wall].rigid_body.mass = 0.0f;
+        instantiate_geometry(box, scene, wall);
+        instantiate_material(default_material, scene, wall);
+        instantiate_model_cbuffer(scene, wall);
+        instantiate_rigid_body(scene, wall);
+    }
 
     vec3f start_positions[] = {
         vec3f(-20.0f, 10.0f, -20.0f), vec3f(20.0f, 10.0f, 20.0f), vec3f(-20.0f, 10.0f, 20.0f),
@@ -58,7 +109,8 @@ void example_setup(ecs::ecs_scene* scene)
 
     const c8* primitive_names[] = {"box", "cylinder", "capsule", "cone", "sphere"};
 
-    u32 primitive_types[] = {physics::BOX, physics::CYLINDER, physics::CAPSULE, physics::CONE, physics::SPHERE};
+    physics::shape_type primitive_types[] = {physics::e_shape::box, physics::e_shape::cylinder, physics::e_shape::capsule,
+                                             physics::e_shape::cone, physics::e_shape::sphere};
 
     geometry_resource* primitive_resources[] = {box, cylinder, capsule, cone, sphere};
 
@@ -79,13 +131,13 @@ void example_setup(ecs::ecs_scene* scene)
 
                 for (s32 k = 0; k < 4; ++k)
                 {
-                    u32 new_prim = get_new_node(scene);
+                    u32 new_prim = get_new_entity(scene);
                     scene->names[new_prim] = primitive_names[p];
                     scene->names[new_prim].appendf("%i", new_prim);
                     scene->transforms[new_prim].rotation = quat();
                     scene->transforms[new_prim].scale = vec3f::one();
                     scene->transforms[new_prim].translation = cur_pos;
-                    scene->entities[new_prim] |= CMP_TRANSFORM;
+                    scene->entities[new_prim] |= e_cmp::transform;
                     scene->parents[new_prim] = new_prim;
                     instantiate_geometry(primitive_resources[p], scene, new_prim);
                     instantiate_material(default_material, scene, new_prim);
@@ -94,6 +146,13 @@ void example_setup(ecs::ecs_scene* scene)
                     scene->physics_data[new_prim].rigid_body.shape = primitive_types[p];
                     scene->physics_data[new_prim].rigid_body.mass = 1.0f;
                     instantiate_rigid_body(scene, new_prim);
+                    
+                    simple_lighting* m = (simple_lighting*)&scene->material_data[new_prim].data[0];
+                    
+                    ImColor ii = ImColor::HSV((rand() % 255) / 255.0f, 1.0f, 1.0f);
+                    m->m_albedo = vec4f(ii.Value.x, ii.Value.y, ii.Value.z, 1.0f);
+                    m->m_roughness = 0.09f;
+                    m->m_reflectivity = 0.3f;
 
                     cur_pos.x += 2.5f;
                 }
@@ -110,6 +169,6 @@ void example_setup(ecs::ecs_scene* scene)
     pen::thread_sleep_ms(16);
 }
 
-void example_update(ecs::ecs_scene* scene)
+void example_update(ecs::ecs_scene* scene, camera& cam, f32 dt)
 {
 }
